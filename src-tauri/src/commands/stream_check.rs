@@ -6,6 +6,7 @@
 use crate::app_config::AppType;
 use crate::commands::copilot::CopilotAuthState;
 use crate::error::AppError;
+use crate::services::real_check::{RealCheckResult, RealCheckService};
 use crate::services::stream_check::{
     HealthStatus, StreamCheckConfig, StreamCheckResult, StreamCheckService,
 };
@@ -163,6 +164,27 @@ fn is_copilot_provider(provider: &crate::provider::Provider) -> bool {
             .and_then(|value| value.as_str())
             .map(|url| url.contains("githubcopilot.com"))
             .unwrap_or(false)
+}
+
+/// 真实模型测试（单个供应商）。
+///
+/// 与 `stream_check_provider`（仅可达性）不同：本命令发送一次真实最小模型请求，
+/// 返回真实 HTTP 状态码与错误分类（auth/forbidden/not_found/rate_limit/server/network）。
+/// 显式用户操作，可能产生极小额计费（max_tokens=1）。不触碰故障转移熔断器。
+#[tauri::command]
+pub async fn real_check_provider(
+    state: State<'_, AppState>,
+    app_type: AppType,
+    provider_id: String,
+    model: Option<String>,
+    timeout_secs: Option<u64>,
+) -> Result<RealCheckResult, AppError> {
+    let providers = state.db.get_all_providers(app_type.as_str())?;
+    let provider = providers
+        .get(&provider_id)
+        .ok_or_else(|| AppError::Message(format!("供应商 {provider_id} 不存在")))?;
+
+    RealCheckService::check(&app_type, provider, model, timeout_secs.unwrap_or(30)).await
 }
 
 #[cfg(test)]

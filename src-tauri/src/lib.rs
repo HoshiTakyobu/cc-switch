@@ -1357,6 +1357,7 @@ pub fn run() {
             commands::stream_check_all_providers,
             commands::get_stream_check_config,
             commands::save_stream_check_config,
+            commands::real_check_provider,
             // Session manager
             commands::list_sessions,
             commands::get_session_messages,

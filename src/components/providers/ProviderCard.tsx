@@ -1,6 +1,8 @@
 import { useMemo, useState, useEffect } from "react";
 import { GripVertical, ChevronDown, ChevronUp } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
+import { realCheckProvider } from "@/lib/api/model-test";
 import type {
   DraggableAttributes,
   DraggableSyntheticListeners,
@@ -253,6 +255,34 @@ export function ProviderCard({
     usage?.success && usage.data && usage.data.length > 1 && !isTokenPlan;
 
   const [isExpanded, setIsExpanded] = useState(false);
+  const [isRealTesting, setIsRealTesting] = useState(false);
+
+  // 真实模型测试：发一次真实请求，按 HTTP 状态码给出明确结果；成功则切换为当前源。
+  const handleRealTest = async () => {
+    if (isRealTesting) return;
+    setIsRealTesting(true);
+    try {
+      const result = await realCheckProvider(appId, provider.id);
+      const code = result.httpStatus ? ` [${result.httpStatus}]` : "";
+      if (result.success) {
+        toast.success(
+          t("provider.realTestOk", {
+            defaultValue: "可用{{code}}（{{model}}），已切换为当前源",
+            code,
+            model: result.modelUsed,
+          }),
+        );
+        onSwitch(provider);
+      } else {
+        toast.error(`${result.message}`);
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIsRealTesting(false);
+    }
+  };
+
 
   useEffect(() => {
     if (hasMultiplePlans) {
@@ -557,6 +587,10 @@ export function ProviderCard({
                   ? () => onTest(provider)
                   : undefined
               }
+              onRealTest={
+                provider.category !== "official" ? handleRealTest : undefined
+              }
+              isRealTesting={isRealTesting}
               onConfigureUsage={
                 (isOfficial && !supportsOfficialSubscription) ||
                 isCopilot ||
