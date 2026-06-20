@@ -982,7 +982,9 @@ function App() {
                       onConfigureUsage={setUsageProvider}
                       onOpenWebsite={handleOpenWebsite}
                       onOpenTerminal={
-                        activeApp === "claude" ? handleOpenTerminal : undefined
+                        activeApp === "claude" || activeApp === "codex"
+                          ? handleOpenTerminal
+                          : undefined
                       }
                       onCreate={() => setIsAddOpen(true)}
                       onSetAsDefault={
