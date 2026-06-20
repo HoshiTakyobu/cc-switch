@@ -19,7 +19,7 @@ import {
   Trash2,
 } from "lucide-react";
 import EndpointSpeedTest from "./EndpointSpeedTest";
-import { ApiKeySection, EndpointField, ModelDropdown } from "./shared";
+import { ApiKeySection, EndpointField, ModelDropdown, ModelInputWithFetch } from "./shared";
 import {
   fetchModelsForConfig,
   showFetchModelsError,
@@ -71,6 +71,10 @@ interface CodexFormFieldsProps {
   // Model Catalog
   catalogModels?: CodexCatalogModel[];
   onCatalogModelsChange?: (models: CodexCatalogModel[]) => void;
+
+  // 顶层模型名称（默认模型，写入 config.toml 的 model；不依赖本地路由映射）
+  model: string;
+  onModelChange: (model: string) => void;
 
   // Speed Test Endpoints
   speedTestEndpoints: EndpointCandidate[];
@@ -133,6 +137,8 @@ export function CodexFormFields({
   onCodexChatReasoningChange,
   catalogModels = [],
   onCatalogModelsChange,
+  model,
+  onModelChange,
   speedTestEndpoints,
   customUserAgent,
   onCustomUserAgentChange,
@@ -343,6 +349,54 @@ export function CodexFormFields({
           onFullUrlChange={onFullUrlChange}
           onManageClick={() => onEndpointModalToggle(true)}
         />
+      )}
+
+      {/* Codex 模型名称 —— base_url 下直接获取/选择，不依赖本地路由映射 */}
+      {category !== "official" && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <label
+              htmlFor="codexModelName"
+              className="block text-sm font-medium text-foreground"
+            >
+              {t("codexConfig.modelName", { defaultValue: "模型名称" })}
+            </label>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleFetchModels}
+              disabled={isFetchingModels}
+              className="h-7 gap-1"
+            >
+              {isFetchingModels ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Download className="h-3.5 w-3.5" />
+              )}
+              {t("providerForm.fetchModels", { defaultValue: "获取模型" })}
+            </Button>
+          </div>
+          <ModelInputWithFetch
+            id="codexModelName"
+            value={model}
+            onChange={onModelChange}
+            placeholder={t("codexConfig.modelNamePlaceholder", {
+              defaultValue: "例如: gpt-5.4",
+            })}
+            fetchedModels={fetchedModels}
+            isLoading={isFetchingModels}
+          />
+          <p className="text-xs text-muted-foreground">
+            {model.trim()
+              ? t("codexConfig.modelNameHint", {
+                  defaultValue: "指定使用的模型，将写入 config.toml 的 model",
+                })
+              : t("providerForm.modelHint", {
+                  defaultValue: "💡 留空将使用供应商的默认模型",
+                })}
+          </p>
+        </div>
       )}
 
       {/* 高级选项 —— 本地路由映射/模型映射/思考能力/自定义 UA；预设供应商通常无需展开 */}
