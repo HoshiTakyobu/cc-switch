@@ -35,10 +35,42 @@ impl ProviderRouter {
     /// - 当前供应商始终优先，保证手动切换后能“指哪打哪”
     /// - 故障转移开启时，再追加故障转移队列，按队列顺序兜底（P1 → P2 → ...）
     /// - 故障转移关闭时，仅返回当前供应商
-    pub async fn select_providers(&self, app_type: &str) -> Result<Vec<Provider>, AppError> {
+    pub async fn select_providers(
+        &self,
+        app_type: &str,
+        bound: Option<(String, bool)>,
+    ) -> Result<Vec<Provider>, AppError> {
         let mut result = Vec::new();
         let mut total_providers = 0usize;
         let mut circuit_open_count = 0usize;
+
+        // ===== 2B：每终端绑定源优先 =====
+        if let Some((bound_id, strict)) = bound.as_ref() {
+            match self.db.get_provider_by_id(bound_id, app_type)? {
+                Some(p) => {
+                    let circuit_key = format!("{app_type}:{}", p.id);
+                    let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
+                    if breaker.is_available().await {
+                        result.push(p);
+                        if *strict {
+                            // 严格：只用绑定源，不参与全局/故障队列
+                            return Ok(result);
+                        }
+                    } else if *strict {
+                        log::warn!("[{app_type}] 绑定源 {bound_id} 已熔断，strict 不回退");
+                        return Err(AppError::AllProvidersCircuitOpen);
+                    }
+                    // 非 strict 且熔断：result 不含它，落到全局逻辑兜底
+                }
+                None => {
+                    if *strict {
+                        log::warn!("[{app_type}] 绑定源 {bound_id} 不存在，strict 不回退");
+                        return Err(AppError::NoProvidersConfigured);
+                    }
+                }
+            }
+            // 非 strict：继续追加 current + 故障队列（下方按 result 去重）
+        }
 
         let current_id = AppType::from_str(app_type)
             .ok()
@@ -51,18 +83,21 @@ impl ProviderRouter {
 
         if let Some(current_id) = current_id.as_deref() {
             if let Some(current) = self.db.get_provider_by_id(current_id, app_type)? {
-                total_providers += 1;
+                // 去重：非 strict 绑定源可能已在 result 中
+                if !result.iter().any(|p| p.id == current.id) {
+                    total_providers += 1;
 
-                let circuit_key = format!("{app_type}:{}", current.id);
-                let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
+                    let circuit_key = format!("{app_type}:{}", current.id);
+                    let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
 
-                if breaker.is_available().await {
-                    result.push(current);
-                } else {
-                    circuit_open_count += 1;
-                    log::warn!(
-                        "[{app_type}] 当前供应商 {current_id} 已熔断，尝试故障转移队列"
-                    );
+                    if breaker.is_available().await {
+                        result.push(current);
+                    } else {
+                        circuit_open_count += 1;
+                        log::warn!(
+                            "[{app_type}] 当前供应商 {current_id} 已熔断，尝试故障转移队列"
+                        );
+                    }
                 }
             }
         }
@@ -372,7 +407,7 @@ mod tests {
         db.add_to_failover_queue("claude", "b").unwrap();
 
         let router = ProviderRouter::new(db.clone());
-        let providers = router.select_providers("claude").await.unwrap();
+        let providers = router.select_providers("claude", None).await.unwrap();
 
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id, "a");
@@ -405,7 +440,7 @@ mod tests {
         db.update_proxy_config_for_app(config).await.unwrap();
 
         let router = ProviderRouter::new(db.clone());
-        let providers = router.select_providers("claude").await.unwrap();
+        let providers = router.select_providers("claude", None).await.unwrap();
 
         // 新语义：当前供应商 a 始终优先，其余按队列顺序兜底；a 在队列中不重复
         assert_eq!(providers.len(), 2);
@@ -437,12 +472,77 @@ mod tests {
         db.update_proxy_config_for_app(config).await.unwrap();
 
         let router = ProviderRouter::new(db.clone());
-        let providers = router.select_providers("claude").await.unwrap();
+        let providers = router.select_providers("claude", None).await.unwrap();
 
         // 新语义：当前供应商 a 即使不在队列也优先返回，队列里的 b 作为兜底
         assert_eq!(providers.len(), 2);
         assert_eq!(providers[0].id, "a");
         assert_eq!(providers[1].id, "b");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_bound_strict_returns_only_bound_provider() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let provider_a =
+            Provider::with_id("a".to_string(), "A".to_string(), json!({}), None);
+        let provider_b =
+            Provider::with_id("b".to_string(), "B".to_string(), json!({}), None);
+        db.save_provider("claude", &provider_a).unwrap();
+        db.save_provider("claude", &provider_b).unwrap();
+        db.set_current_provider("claude", "a").unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        let providers = router
+            .select_providers("claude", Some(("b".to_string(), true)))
+            .await
+            .unwrap();
+        // 严格绑定：只返回绑定源 b，不含当前源 a
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "b");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_bound_strict_missing_provider_errors() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let provider_a =
+            Provider::with_id("a".to_string(), "A".to_string(), json!({}), None);
+        db.save_provider("claude", &provider_a).unwrap();
+        db.set_current_provider("claude", "a").unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        let result = router
+            .select_providers("claude", Some(("ghost".to_string(), true)))
+            .await;
+        // 严格绑定且绑定源不存在：直接报错，不回退
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_bound_nonstrict_then_global_fallback() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let provider_a =
+            Provider::with_id("a".to_string(), "A".to_string(), json!({}), None);
+        let provider_b =
+            Provider::with_id("b".to_string(), "B".to_string(), json!({}), None);
+        db.save_provider("claude", &provider_a).unwrap();
+        db.save_provider("claude", &provider_b).unwrap();
+        db.set_current_provider("claude", "a").unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        let providers = router
+            .select_providers("claude", Some(("b".to_string(), false)))
+            .await
+            .unwrap();
+        // 非严格绑定：绑定源 b 置顶，再追加当前源 a 兜底
+        assert_eq!(providers.len(), 2);
+        assert_eq!(providers[0].id, "b");
+        assert_eq!(providers[1].id, "a");
     }
 
     #[tokio::test]
@@ -482,7 +582,7 @@ mod tests {
             .await
             .unwrap();
 
-        let providers = router.select_providers("claude").await.unwrap();
+        let providers = router.select_providers("claude", None).await.unwrap();
         assert_eq!(providers.len(), 2);
 
         assert!(router.allow_provider_request("b", "claude").await.allowed);
@@ -579,7 +679,7 @@ mod tests {
             .await
             .unwrap();
 
-        let providers = router.select_providers("claude").await.unwrap();
+        let providers = router.select_providers("claude", None).await.unwrap();
 
         // 当前供应商 a 已熔断被跳过，回退到队列里的 b
         assert_eq!(providers.len(), 1);
@@ -626,7 +726,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = router.select_providers("claude").await;
+        let result = router.select_providers("claude", None).await;
         assert!(matches!(result, Err(AppError::AllProvidersCircuitOpen)));
     }
 
@@ -638,7 +738,7 @@ mod tests {
 
         // 不设置当前供应商，也不加入队列
         let router = ProviderRouter::new(db.clone());
-        let result = router.select_providers("claude").await;
+        let result = router.select_providers("claude", None).await;
         assert!(matches!(result, Err(AppError::NoProvidersConfigured)));
     }
 }

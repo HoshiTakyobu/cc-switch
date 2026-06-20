@@ -92,6 +92,7 @@ impl RequestContext {
         app_type: AppType,
         tag: &'static str,
         app_type_str: &'static str,
+        peer: Option<std::net::SocketAddr>,
     ) -> Result<Self, ProxyError> {
         let start_time = Instant::now();
 
@@ -129,11 +130,25 @@ impl RequestContext {
             session_result.client_provided
         );
 
+        // 2B：解析该请求所属终端的绑定源（对端源端口 → PID → terminal_bindings）
+        let bound: Option<(String, bool)> = peer
+            .and_then(|p| crate::proxy::peer_pid::resolve_pid(p.port()))
+            .and_then(|pid| {
+                state
+                    .db
+                    .get_terminal_binding_by_pid(pid as i64, app_type_str)
+                    .ok()
+                    .flatten()
+            });
+        if let Some((ref bid, strict)) = bound {
+            log::debug!("[{tag}] 终端绑定源命中: {bid} (strict={strict})");
+        }
+
         // 使用共享的 ProviderRouter 选择 Provider（熔断器状态跨请求保持）
         // 注意：只在这里调用一次，结果传递给 forwarder，避免重复消耗 HalfOpen 名额
         let providers = state
             .provider_router
-            .select_providers(app_type_str)
+            .select_providers(app_type_str, bound)
             .await
             .map_err(|e| match e {
                 crate::error::AppError::AllProvidersCircuitOpen => {
