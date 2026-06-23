@@ -56,6 +56,7 @@ import {
 import { mergeProviderMeta } from "@/utils/providerMetaUtils";
 import {
   extractCodexWireApi,
+  extractCodexModelName,
   setCodexWireApi,
   setCodexModelName as setCodexModelNameInConfig,
 } from "@/utils/providerConfigUtils";
@@ -1196,11 +1197,16 @@ function ProviderFormFull({
           category !== "official" && localCodexApiFormat === "openai_chat"
             ? normalizeCodexCatalogModelsForSave(codexCatalogModels)
             : [];
-        // Sync first catalog row's model into config.toml so Codex uses it as default
-        if (normalizedCatalogModels.length > 0) {
+        // 顶层「模型名称」字段优先写入 config.toml 的 model（不依赖本地路由）；
+        // 为空时回退到模型映射首行，保持旧的 chat 路由行为。
+        const effectiveCodexModel =
+          (extractCodexModelName(normalizedCodexConfig) ?? "").trim() ||
+          normalizedCatalogModels[0]?.model ||
+          "";
+        if (effectiveCodexModel) {
           normalizedCodexConfig = setCodexModelNameInConfig(
             normalizedCodexConfig,
-            normalizedCatalogModels[0].model,
+            effectiveCodexModel,
           );
         }
         const configObj = {
@@ -2054,6 +2060,10 @@ function ProviderFormFull({
               onCodexChatReasoningChange={setCodexChatReasoning}
               catalogModels={codexCatalogModels}
               onCatalogModelsChange={setCodexCatalogModels}
+              model={extractCodexModelName(codexConfig) ?? ""}
+              onModelChange={(m) =>
+                setCodexConfig(setCodexModelNameInConfig(codexConfig, m))
+              }
               speedTestEndpoints={speedTestEndpoints}
               customUserAgent={customUserAgent}
               onCustomUserAgentChange={setCustomUserAgent}

@@ -137,7 +137,7 @@ pub async fn handle_claude_desktop_models(
     validate_claude_desktop_gateway_auth(&state, &headers)?;
     let providers = state
         .provider_router
-        .select_providers("claude-desktop")
+        .select_providers("claude-desktop", None)
         .await
         .map_err(|e| ProxyError::DatabaseError(e.to_string()))?;
     let provider = providers.first().ok_or(ProxyError::NoAvailableProvider)?;
@@ -168,7 +168,7 @@ async fn handle_messages_for_app(
         .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?;
 
     let mut ctx =
-        RequestContext::new(&state, &body, &headers, app_type.clone(), tag, app_type_str).await?;
+        RequestContext::new(&state, &body, &headers, app_type.clone(), tag, app_type_str, extensions.get::<crate::proxy::peer_pid::PeerAddr>().map(|p| p.0)).await?;
 
     let raw_endpoint = uri
         .path_and_query()
@@ -591,7 +591,7 @@ pub async fn handle_chat_completions(
         .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?;
 
     let mut ctx =
-        RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await?;
+        RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex", extensions.get::<crate::proxy::peer_pid::PeerAddr>().map(|p| p.0)).await?;
     let endpoint = endpoint_with_query(&uri, "/chat/completions");
 
     let is_stream = body
@@ -656,7 +656,7 @@ pub async fn handle_responses(
         .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?;
 
     let mut ctx =
-        RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await?;
+        RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex", extensions.get::<crate::proxy::peer_pid::PeerAddr>().map(|p| p.0)).await?;
     let endpoint = endpoint_with_query(&uri, "/responses");
 
     let is_stream = body
@@ -734,7 +734,7 @@ pub async fn handle_responses_compact(
         .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?;
 
     let mut ctx =
-        RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await?;
+        RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex", extensions.get::<crate::proxy::peer_pid::PeerAddr>().map(|p| p.0)).await?;
     let endpoint = endpoint_with_query(&uri, "/responses/compact");
 
     let is_stream = body
@@ -1304,7 +1304,7 @@ pub async fn handle_gemini(
     };
 
     // Gemini 的模型名称在 URI 中
-    let mut ctx = RequestContext::new(&state, &body, &headers, AppType::Gemini, "Gemini", "gemini")
+    let mut ctx = RequestContext::new(&state, &body, &headers, AppType::Gemini, "Gemini", "gemini", extensions.get::<crate::proxy::peer_pid::PeerAddr>().map(|p| p.0))
         .await?
         .with_model_from_uri(&uri);
 

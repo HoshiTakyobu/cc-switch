@@ -62,3 +62,44 @@ export async function saveStreamCheckConfig(
 ): Promise<void> {
   return invoke("save_stream_check_config", { config });
 }
+
+// ===== 真实模型测试 =====
+// 与可达性检查不同：发送一次真实最小模型请求，返回真实 HTTP 状态码与错误分类。
+// 显式用户操作，可能产生极小额计费（max_tokens=1）。不触碰故障转移熔断器。
+
+export type RealCheckErrorCategory =
+  | "auth"
+  | "forbidden"
+  | "not_found"
+  | "rate_limit"
+  | "server"
+  | "network"
+  | "unknown";
+
+export interface RealCheckResult {
+  success: boolean;
+  message: string;
+  httpStatus?: number;
+  modelUsed: string;
+  responseTimeMs?: number;
+  errorCategory?: RealCheckErrorCategory;
+  testedAt: number;
+}
+
+/**
+ * 真实模型测试（单个供应商）。
+ * @param model 可选；不传则后端从供应商配置推断测试模型。
+ */
+export async function realCheckProvider(
+  appType: AppId,
+  providerId: string,
+  model?: string,
+  timeoutSecs?: number,
+): Promise<RealCheckResult> {
+  return invoke("real_check_provider", {
+    appType,
+    providerId,
+    model,
+    timeoutSecs,
+  });
+}

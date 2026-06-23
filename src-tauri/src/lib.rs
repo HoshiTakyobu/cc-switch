@@ -1337,6 +1337,11 @@ pub fn run() {
             commands::remove_from_failover_queue,
             commands::get_auto_failover_enabled,
             commands::set_auto_failover_enabled,
+            // Per-terminal provider binding (2B)
+            commands::list_running_terminals,
+            commands::list_terminal_bindings,
+            commands::set_terminal_binding,
+            commands::clear_terminal_binding,
             // Usage statistics
             commands::get_usage_summary,
             commands::get_usage_summary_by_app,
@@ -1357,6 +1362,7 @@ pub fn run() {
             commands::stream_check_all_providers,
             commands::get_stream_check_config,
             commands::save_stream_check_config,
+            commands::real_check_provider,
             // Session manager
             commands::list_sessions,
             commands::get_session_messages,

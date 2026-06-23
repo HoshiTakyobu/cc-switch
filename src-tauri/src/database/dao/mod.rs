@@ -11,6 +11,7 @@ pub mod proxy;
 pub mod settings;
 pub mod skills;
 pub mod stream_check;
+pub mod terminal_bindings;
 pub mod universal_providers;
 pub mod usage_rollup;
 

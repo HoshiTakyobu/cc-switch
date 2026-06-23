@@ -143,7 +143,7 @@ impl ProxyServer {
             loop {
                 tokio::select! {
                     result = listener.accept() => {
-                        let (stream, _remote_addr) = match result {
+                        let (stream, remote_addr) = match result {
                             Ok(v) => v,
                             Err(e) => {
                                 log::error!("[{SRV}] accept 失败: {e}", SRV = log_srv::ACCEPT_ERR);
@@ -184,6 +184,12 @@ impl ProxyServer {
 
                                     // Insert our own header case map alongside hyper's internal one
                                     parts.extensions.insert(cases);
+
+                                    // 2B：把对端地址（客户端源端口）放进 extensions，
+                                    // 供 handler → 解析 PID → 终端绑定源路由。
+                                    parts
+                                        .extensions
+                                        .insert(super::peer_pid::PeerAddr(remote_addr));
 
                                     let body = axum::body::Body::new(body);
                                     let axum_req = http::Request::from_parts(parts, body);

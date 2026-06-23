@@ -2582,15 +2582,116 @@ pub async fn open_provider_terminal(
         .get(&providerId)
         .ok_or_else(|| format!("提供商 {providerId} 不存在"))?;
 
-    // 从提供商配置中提取环境变量
-    let config = &provider.settings_config;
-    let env_vars = extract_env_vars_from_config(config, &app_type);
+    // Codex 走"独立 CODEX_HOME 绑定该源"；其余（Claude/Gemini）走 env + claude --settings
+    if app_type == AppType::Codex {
+        launch_codex_terminal_bound(provider, &providerId, launch_cwd.as_deref())
+            .map_err(|e| format!("启动终端失败: {e}"))?;
+    } else {
+        // 从提供商配置中提取环境变量
+        let config = &provider.settings_config;
+        let env_vars = extract_env_vars_from_config(config, &app_type);
 
-    // 根据平台启动终端，传入提供商ID用于生成唯一的配置文件名
-    launch_terminal_with_env(env_vars, &providerId, launch_cwd.as_deref())
-        .map_err(|e| format!("启动终端失败: {e}"))?;
+        // 根据平台启动终端，传入提供商ID用于生成唯一的配置文件名
+        launch_terminal_with_env(env_vars, &providerId, launch_cwd.as_deref())
+            .map_err(|e| format!("启动终端失败: {e}"))?;
+    }
 
     Ok(true)
+}
+
+/// 为某个 Codex 源开一个"绑定该源"的终端：生成独立 CODEX_HOME（含该源的
+/// config.toml + auth.json，直连该源、绕开 15721 共享故障队列），并启动一个
+/// 终端窗口运行 `codex`。仅 Windows 实现（用户平台）。
+fn launch_codex_terminal_bound(
+    provider: &crate::provider::Provider,
+    provider_id: &str,
+    cwd: Option<&Path>,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        launch_codex_terminal_bound_windows(provider, provider_id, cwd)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (provider, provider_id, cwd);
+        Err("Codex 终端绑定目前仅支持 Windows".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn launch_codex_terminal_bound_windows(
+    provider: &crate::provider::Provider,
+    provider_id: &str,
+    cwd: Option<&Path>,
+) -> Result<(), String> {
+    let cfg = &provider.settings_config;
+    let config_toml = cfg
+        .get("config")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "该 Codex 源缺少 config 配置，无法绑定".to_string())?;
+    let auth_val = cfg
+        .get("auth")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+
+    let pid = std::process::id();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    // 独立 CODEX_HOME：%TEMP%\cc-switch-codex-<sanitized id>-<pid>\
+    let sanitized: String = provider_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let temp_dir = std::env::temp_dir();
+    let codex_home = temp_dir.join(format!("cc-switch-codex-{sanitized}-{pid}"));
+    std::fs::create_dir_all(&codex_home).map_err(|e| format!("创建 CODEX_HOME 失败: {e}"))?;
+    std::fs::write(codex_home.join("config.toml"), config_toml)
+        .map_err(|e| format!("写 config.toml 失败: {e}"))?;
+    let auth_json =
+        serde_json::to_string_pretty(&auth_val).map_err(|e| format!("序列化 auth 失败: {e}"))?;
+    std::fs::write(codex_home.join("auth.json"), auth_json)
+        .map_err(|e| format!("写 auth.json 失败: {e}"))?;
+
+    let terminal_id = format!("{pid}-{ts}");
+    let home_b = escape_windows_batch_value(&codex_home.to_string_lossy());
+    let pid_b = escape_windows_batch_value(provider_id);
+    let cwd_command = build_windows_cwd_command(cwd);
+
+    let bat_file = temp_dir.join(format!("cc_switch_codex_{pid}.bat"));
+    let content = format!(
+        "@echo off\r\n\
+set \"CODEX_HOME={home_b}\"\r\n\
+set \"CC_SWITCH_TERMINAL_ID={terminal_id}\"\r\n\
+set \"CC_SWITCH_BOUND_PROVIDER={pid_b}\"\r\n\
+{cwd_command}\
+echo Bound Codex provider: {pid_b}\r\n\
+echo CODEX_HOME=%CODEX_HOME%\r\n\
+codex\r\n\
+rmdir /s /q \"{home_b}\" >nul 2>&1\r\n\
+del \"%~f0\" >nul 2>&1\r\n",
+    );
+    std::fs::write(&bat_file, &content).map_err(|e| format!("写入批处理文件失败: {e}"))?;
+
+    let bat_path = bat_file.to_string_lossy();
+    let ps_cmd = format!("& '{}'", bat_path);
+    let preferred = crate::settings::get_preferred_terminal();
+    let terminal = preferred.as_deref().unwrap_or("cmd");
+    let result = match terminal {
+        "powershell" => run_windows_start_command(
+            &["powershell", "-NoExit", "-Command", &ps_cmd],
+            "PowerShell",
+        ),
+        "wt" => run_windows_start_command(&["wt", "cmd", "/K", &bat_path], "Windows Terminal"),
+        _ => run_windows_start_command(&["cmd", "/K", &bat_path], "cmd"),
+    };
+    if result.is_err() && terminal != "cmd" {
+        log::warn!("首选终端 {terminal} 启动失败，回退到 cmd: {:?}", result.as_ref().err());
+        return run_windows_start_command(&["cmd", "/K", &bat_path], "cmd");
+    }
+    result
 }
 
 /// 从提供商配置中提取环境变量

@@ -295,6 +295,23 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        // 19. Terminal Bindings 表（每终端绑定源：2B 运行时按 PID 指派）
+        // 纯增量：CREATE TABLE IF NOT EXISTS 在每次启动的 create_tables 中幂等执行，
+        // 无需提升 SCHEMA_VERSION。terminal_id = "<app>:<pid>"。
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS terminal_bindings (
+                terminal_id TEXT PRIMARY KEY,
+                pid INTEGER NOT NULL,
+                app TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                strict INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL,
+                last_seen INTEGER NOT NULL
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
         // 尝试添加 live_takeover_active 列到 proxy_config 表
         let _ = conn.execute(
             "ALTER TABLE proxy_config ADD COLUMN live_takeover_active INTEGER NOT NULL DEFAULT 0",

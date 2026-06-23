@@ -4,6 +4,8 @@ import {
   Check,
   Copy,
   Edit,
+  ListChecks,
+  ListPlus,
   Loader2,
   Minus,
   Play,
@@ -28,6 +30,8 @@ interface ProviderActionsProps {
   onEdit: () => void;
   onDuplicate: () => void;
   onTest?: () => void;
+  onRealTest?: () => void;
+  isRealTesting?: boolean;
   onConfigureUsage?: () => void;
   onDelete: () => void;
   onRemoveFromConfig?: () => void;
@@ -67,6 +71,8 @@ export function ProviderActions({
   onEdit,
   onDuplicate,
   onTest,
+  onRealTest,
+  isRealTesting = false,
   onConfigureUsage,
   onDelete,
   onRemoveFromConfig,
@@ -112,9 +118,9 @@ export function ProviderActions({
       } else {
         onSwitch(); // 添加到配置
       }
-    } else if (isFailoverMode) {
-      onToggleFailover(!isInFailoverQueue);
     } else {
+      // 主按钮始终表示“切换为当前供应商”，即使故障转移开启也指哪打哪。
+      // 故障转移队列的加入/移出由独立的小按钮负责。
       onSwitch();
     }
   };
@@ -161,27 +167,6 @@ export function ProviderActions({
           "bg-emerald-500 hover:bg-emerald-600 dark:bg-emerald-600 dark:hover:bg-emerald-700",
         icon: <Plus className="h-4 w-4" />,
         text: t("provider.addToConfig", { defaultValue: "添加" }),
-      };
-    }
-
-    if (isFailoverMode) {
-      if (isInFailoverQueue) {
-        return {
-          disabled: false,
-          variant: "secondary" as const,
-          className:
-            "bg-blue-100 text-blue-600 hover:bg-blue-200 dark:bg-blue-900/50 dark:text-blue-400 dark:hover:bg-blue-900/70",
-          icon: <Check className="h-4 w-4" />,
-          text: t("failover.inQueue", { defaultValue: "已加入" }),
-        };
-      }
-      return {
-        disabled: false,
-        variant: "default" as const,
-        className:
-          "bg-blue-500 hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700",
-        icon: <Plus className="h-4 w-4" />,
-        text: t("failover.addQueue", { defaultValue: "加入" }),
       };
     }
 
@@ -281,6 +266,31 @@ export function ProviderActions({
       </span>
 
       <div className="flex items-center gap-1">
+        {isFailoverMode && (
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={() => onToggleFailover?.(!isInFailoverQueue)}
+            title={
+              isInFailoverQueue
+                ? t("failover.removeQueue", { defaultValue: "移出故障转移队列" })
+                : t("failover.addQueue", { defaultValue: "加入故障转移队列" })
+            }
+            className={cn(
+              iconButtonClass,
+              isInFailoverQueue
+                ? "text-blue-600 dark:text-blue-400"
+                : "hover:text-blue-600 dark:hover:text-blue-400",
+            )}
+          >
+            {isInFailoverQueue ? (
+              <ListChecks className="h-4 w-4" />
+            ) : (
+              <ListPlus className="h-4 w-4" />
+            )}
+          </Button>
+        )}
+
         <Button
           size="icon"
           variant="ghost"
@@ -322,6 +332,28 @@ export function ProviderActions({
             <Activity className="h-4 w-4" />
           )}
         </Button>
+
+        {onRealTest && (
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={onRealTest}
+            disabled={isRealTesting}
+            title={t("provider.realModelTest", {
+              defaultValue: "真实模型测试（发一次真实请求，显示状态码）",
+            })}
+            className={cn(
+              iconButtonClass,
+              "hover:text-amber-600 dark:hover:text-amber-400",
+            )}
+          >
+            {isRealTesting ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Zap className="h-4 w-4" />
+            )}
+          </Button>
+        )}
 
         <Button
           size="icon"
