@@ -18,7 +18,7 @@
 
 ## 下载
 
-请从本仓库的 [Releases](https://github.com/HoshiTakyobu/cc-switch/releases) 下载 Windows 安装包：
+请从本仓库的 [Releases](https://github.com/HoshiTakyobu/cc-switch-self-use/releases) 下载 Windows 安装包：
 
 - `Windows.msi`：标准安装包
 - `Windows-Portable.zip`：便携版

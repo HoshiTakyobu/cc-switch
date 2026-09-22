@@ -1070,10 +1070,10 @@ pub fn handle_tray_menu_event(app: &tauri::AppHandle, event_id: &str) {
             }
         }
         "open_website" => {
-            if let Err(e) = app
-                .opener()
-                .open_url("https://github.com/HoshiTakyobu/cc-switch", None::<String>)
-            {
+            if let Err(e) = app.opener().open_url(
+                "https://github.com/HoshiTakyobu/cc-switch-self-use",
+                None::<String>,
+            ) {
                 log::error!("打开项目页面失败: {e}");
             }
         }

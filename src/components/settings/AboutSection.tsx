@@ -453,13 +453,13 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
 
       if (!displayVersion) {
         await settingsApi.openExternal(
-          "https://github.com/HoshiTakyobu/cc-switch/releases",
+          "https://github.com/HoshiTakyobu/cc-switch-self-use/releases",
         );
         return;
       }
 
       await settingsApi.openExternal(
-        `https://github.com/HoshiTakyobu/cc-switch/releases/tag/${displayVersion}`,
+        `https://github.com/HoshiTakyobu/cc-switch-self-use/releases/tag/${displayVersion}`,
       );
     } catch (error) {
       console.error("[AboutSection] Failed to open release notes", error);
@@ -915,7 +915,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               size="sm"
               onClick={() =>
                 settingsApi.openExternal(
-                  "https://github.com/HoshiTakyobu/cc-switch",
+                  "https://github.com/HoshiTakyobu/cc-switch-self-use",
                 )
               }
               className="h-8 gap-1.5 text-xs"
@@ -929,7 +929,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               size="sm"
               onClick={() =>
                 settingsApi.openExternal(
-                  "https://github.com/HoshiTakyobu/cc-switch",
+                  "https://github.com/HoshiTakyobu/cc-switch-self-use",
                 )
               }
               className="h-8 gap-1.5 text-xs"

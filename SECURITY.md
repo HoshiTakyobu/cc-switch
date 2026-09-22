@@ -6,4 +6,4 @@ CC Switch 二开版是本地桌面应用，不运营云端后端。API Key、OAu
 
 如果发现可复现的安全问题，请通过本仓库的 GitHub Security Advisory 私下报告：
 
-<https://github.com/HoshiTakyobu/cc-switch/security/advisories/new>
+<https://github.com/HoshiTakyobu/cc-switch-self-use/security/advisories/new>

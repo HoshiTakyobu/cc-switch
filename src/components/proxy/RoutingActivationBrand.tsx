@@ -85,7 +85,7 @@ export function RoutingActivationBrand({
       )}
 
       <motion.a
-        href="https://github.com/HoshiTakyobu/cc-switch"
+        href="https://github.com/HoshiTakyobu/cc-switch-self-use"
         target="_blank"
         rel="noreferrer"
         className={cn(
