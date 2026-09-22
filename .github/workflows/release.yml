@@ -264,9 +264,12 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:WINDOWS_RELEASE_ARCH -eq 'arm64') {
-            pnpm tauri build --target aarch64-pc-windows-msvc --bundles msi
+            pnpm tauri build --target aarch64-pc-windows-msvc --bundles msi --config '{"version":"3.20.3"}'
           } else {
-            pnpm tauri build
+            # MSI requires numeric-only prerelease identifiers. Keep the
+            # repository's unified version for the app/release tag, but use a
+            # numeric Tauri bundle version for Windows packaging.
+            pnpm tauri build --config '{"version":"3.20.3"}'
           }
 
       - name: Build Tauri App (Linux)
