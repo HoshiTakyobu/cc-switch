@@ -39,6 +39,10 @@ pnpm tauri build
 pnpm run build:renderer
 ```
 
+## 使用手册
+
+请查看[中文手册索引](docs/user-manual/zh/INDEX.md)。
+
 ## 数据与安全
 
 这是本地桌面应用，配置、账号和会话数据保存在用户自己的设备上。升级或切换版本前，请先备份 Codex、Claude Code 等工具的配置文件。

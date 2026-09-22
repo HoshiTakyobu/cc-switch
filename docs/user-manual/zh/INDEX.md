@@ -12,11 +12,17 @@
 - [故障切换](./4-proxy/4.3-failover.md)
 - [常见问题](./5-faq/5.2-questions.md)
 
-## 说明
+## 当前二开行为
 
 - 官方 OpenAI 登录源和第三方中转源统一使用 `custom` provider。
 - 官方源和非官方源可以共同加入路由与故障切换队列。
 - Codex 会话统一按 `custom` provider 展示，避免切换来源后出现两套会话历史。
 - 更新按钮和自动更新流程已关闭，软件版本从本仓库 Releases 手动获取。
 
-完整章节见上级目录中的[中文手册索引](../README.md)。
+## 完整章节
+
+- [快速入门](./1-getting-started/)
+- [供应商管理](./2-providers/)
+- [扩展功能](./3-extensions/)
+- [代理与高可用](./4-proxy/)
+- [常见问题](./5-faq/)
