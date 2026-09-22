@@ -1,22 +1,22 @@
-# CC Switch User Manual / 用户手册 / ユーザーマニュアル
+# CC Switch 二开版使用说明
 
-> Claude Code / Claude Desktop / Codex / Gemini CLI / OpenCode / OpenClaw / Hermes
+当前仓库维护中文使用说明，内容以本二开版的 provider 统一、路由和故障切换行为为准。
 
-## Language / 语言 / 言語
+## 快速入口
 
-| Language | Link |
-|----------|------|
-| [中文](./zh/README.md) | 简体中文用户手册 |
-| [English](./en/README.md) | English User Manual |
-| [日本語](./ja/README.md) | 日本語ユーザーマニュアル |
+- [安装与首次启动](./zh/1-getting-started/1.2-installation.md)
+- [添加和编辑供应商](./zh/2-providers/2.1-add.md)
+- [切换供应商](./zh/2-providers/2.2-switch.md)
+- [路由服务](./zh/4-proxy/4.1-service.md)
+- [故障切换](./zh/4-proxy/4.3-failover.md)
+- [Codex 配置与会话 FAQ](./zh/5-faq/5.2-questions.md)
 
-## Version / 版本 / バージョン
+## 目录
 
-- Documentation version: v3.16.0
-- Last updated: 2026-05-29
-- Compatible with CC Switch v3.16.0+
+- [快速入门](./zh/1-getting-started/)
+- [供应商管理](./zh/2-providers/)
+- [扩展功能](./zh/3-extensions/)
+- [代理与高可用](./zh/4-proxy/)
+- [常见问题](./zh/5-faq/)
 
-## Links
-
-- [GitHub Issues](https://github.com/farion1231/cc-switch/issues)
-- [GitHub Repository](https://github.com/farion1231/cc-switch)
+旧版多语言手册和上游版本历史不在本二开仓库首页维护。
