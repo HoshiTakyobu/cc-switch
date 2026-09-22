@@ -108,6 +108,16 @@ export function useFailoverQueue(appType: string, enabled = true) {
   });
 }
 
+/** Backend-owned provider eligibility and explanatory reason. */
+export function useFailoverEligibility(appType: string, enabled = true) {
+  return useQuery({
+    queryKey: ["failoverEligibility", appType],
+    queryFn: () => failoverApi.getFailoverEligibility(appType),
+    enabled: enabled && !!appType,
+    staleTime: 30_000,
+  });
+}
+
 /**
  * 获取可添加到队列的供应商
  */

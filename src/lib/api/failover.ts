@@ -20,6 +20,12 @@ export interface Provider {
   iconColor?: string;
 }
 
+export interface FailoverEligibility {
+  providerId: string;
+  eligible: boolean;
+  reason?: string;
+}
+
 export const failoverApi = {
   // ========== 熔断器 API ==========
 
@@ -69,6 +75,12 @@ export const failoverApi = {
   // 获取可添加到队列的供应商（不在队列中的）
   async getAvailableProvidersForFailover(appType: string): Promise<Provider[]> {
     return invoke("get_available_providers_for_failover", { appType });
+  },
+
+  async getFailoverEligibility(
+    appType: string,
+  ): Promise<FailoverEligibility[]> {
+    return invoke("get_failover_eligibility", { appType });
   },
 
   // 添加供应商到故障转移队列

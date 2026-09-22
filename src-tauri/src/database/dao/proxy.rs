@@ -248,7 +248,23 @@ impl Database {
         // conn 已在 block 结束时释放
 
         match result {
-            Ok(config) => Ok(config),
+            Ok(mut config) => {
+                // Repair the state left by older builds where disabling live
+                // takeover did not clear auto_failover_enabled. Returning the
+                // repaired value prevents a stale queue from affecting the
+                // current request, and persisting it makes the repair survive
+                // restarts without requiring a separate migration.
+                if !config.enabled && config.auto_failover_enabled {
+                    let conn = lock_conn!(self.conn);
+                    conn.execute(
+                        "UPDATE proxy_config SET auto_failover_enabled = 0, updated_at = datetime('now') WHERE app_type = ?1",
+                        [&config.app_type],
+                    )
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                    config.auto_failover_enabled = false;
+                }
+                Ok(config)
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 // 如果不存在，创建默认配置
                 self.init_proxy_config_rows().await?;

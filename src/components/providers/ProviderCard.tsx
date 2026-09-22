@@ -34,6 +34,7 @@ import { resolveManagedAccountId } from "@/lib/authBinding";
 import {
   resolveCodexOfficialIdentity,
   supportsOfficialProxyTakeover,
+  supportsProviderFailover,
   providerNeedsRouting,
 } from "@/utils/providerCapabilities";
 import { useProviderHealth } from "@/lib/query/failover";
@@ -56,6 +57,7 @@ interface ProviderCardProps {
   isOmo?: boolean;
   isOmoSlim?: boolean;
   onSwitch: (provider: Provider) => void;
+  onSwitchImmediately?: (provider: Provider) => void;
   onEdit: (provider: Provider) => void;
   onDelete: (provider: Provider) => void;
   onRemoveFromConfig?: (provider: Provider) => void;
@@ -74,6 +76,7 @@ interface ProviderCardProps {
   failoverPriority?: number; // 故障转移优先级（1 = P1, 2 = P2, ...）
   isInFailoverQueue?: boolean; // 是否在故障转移队列中
   onToggleFailover?: (enabled: boolean) => void; // 切换故障转移队列
+  failoverDisabledReason?: string;
   activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
   // OpenClaw: default model
   isDefaultModel?: boolean;
@@ -173,6 +176,7 @@ export function ProviderCard({
   isOmo = false,
   isOmoSlim = false,
   onSwitch,
+  onSwitchImmediately,
   onEdit,
   onDelete,
   onRemoveFromConfig,
@@ -191,6 +195,7 @@ export function ProviderCard({
   failoverPriority,
   isInFailoverQueue = false,
   onToggleFailover,
+  failoverDisabledReason,
   activeProviderId,
   // OpenClaw: default model
   isDefaultModel,
@@ -289,6 +294,7 @@ export function ProviderCard({
     appId,
     provider,
   );
+  const supportsFailoverTarget = supportsProviderFailover(appId, provider);
   const isOfficialBlockedByProxy =
     isProxyTakeover &&
     provider.category === "official" &&
@@ -493,7 +499,7 @@ export function ProviderCard({
               )}
 
               {isProxyRunning &&
-                !supportsOfficialRouting &&
+                supportsFailoverTarget &&
                 isInFailoverQueue &&
                 health && (
                   <ProviderHealthBadge
@@ -503,7 +509,7 @@ export function ProviderCard({
                 )}
 
               {isAutoFailoverEnabled &&
-                !supportsOfficialRouting &&
+                supportsFailoverTarget &&
                 isInFailoverQueue &&
                 failoverPriority && (
                   <FailoverPriorityBadge priority={failoverPriority} />
@@ -698,9 +704,15 @@ export function ProviderCard({
               isTesting={isTesting}
               isProxyTakeover={isProxyTakeover}
               isOfficialBlockedByProxy={isOfficialBlockedByProxy}
+              failoverDisabledReason={failoverDisabledReason}
               isReadOnly={isHermesReadOnly}
               isOmo={isAnyOmo}
               onSwitch={() => onSwitch(provider)}
+              onSwitchImmediately={
+                onSwitchImmediately
+                  ? () => onSwitchImmediately(provider)
+                  : undefined
+              }
               onEdit={() => onEdit(provider)}
               onDuplicate={() => onDuplicate(provider)}
               onTest={
@@ -734,7 +746,7 @@ export function ProviderCard({
               isAutoFailoverEnabled={isAutoFailoverEnabled}
               isInFailoverQueue={isInFailoverQueue}
               onToggleFailover={
-                supportsOfficialRouting ? undefined : onToggleFailover
+                supportsFailoverTarget ? onToggleFailover : undefined
               }
               // OpenClaw: default model
               isDefaultModel={isDefaultModel}

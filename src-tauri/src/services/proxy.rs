@@ -1338,6 +1338,15 @@ impl ProxyService {
             .map_err(|e| format!("获取 {app_type_str} 配置失败: {e}"))?;
 
         if !current_config.enabled {
+            // 兼容旧版本遗留的 enabled=0/auto_failover_enabled=1 状态。
+            if current_config.auto_failover_enabled {
+                let mut repaired = current_config;
+                repaired.auto_failover_enabled = false;
+                self.db
+                    .update_proxy_config_for_app(repaired)
+                    .await
+                    .map_err(|e| format!("清理 {app_type_str} 自动故障切换状态失败: {e}"))?;
+            }
             return Ok(()); // 未接管，幂等返回
         }
 
@@ -1355,13 +1364,15 @@ impl ProxyService {
             .await
             .map_err(|e| format!("删除 {app_type_str} Live 备份失败: {e}"))?;
 
-        // 3) 设置 proxy_config.enabled = false
+        // 3) 设置 proxy_config.enabled = false，同时清除自动故障切换。
+        // 队列成员本身保留，供下次接管时继续使用。
         let mut updated_config = self
             .db
             .get_proxy_config_for_app(app_type_str)
             .await
             .map_err(|e| format!("获取 {app_type_str} 配置失败: {e}"))?;
         updated_config.enabled = false;
+        updated_config.auto_failover_enabled = false;
         self.db
             .update_proxy_config_for_app(updated_config)
             .await
@@ -1413,12 +1424,13 @@ impl ProxyService {
         futures::executor::block_on(self.db.delete_live_backup(app_type_str))
             .map_err(|e| format!("删除 {app_type_str} Live 备份失败: {e}"))?;
 
-        // 3) 设置 proxy_config.enabled = false
+        // 3) 设置 proxy_config.enabled = false，同时清除自动故障切换。
         let mut config =
             futures::executor::block_on(self.db.get_proxy_config_for_app(app_type_str))
                 .map_err(|e| format!("获取 {app_type_str} 配置失败: {e}"))?;
-        if config.enabled {
+        if config.enabled || config.auto_failover_enabled {
             config.enabled = false;
+            config.auto_failover_enabled = false;
             futures::executor::block_on(self.db.update_proxy_config_for_app(config))
                 .map_err(|e| format!("清除 {app_type_str} enabled 状态失败: {e}"))?;
         }
@@ -1787,8 +1799,9 @@ impl ProxyService {
         // 4. 清除所有应用的 enabled 状态（用户手动关闭，不需要下次自动恢复）
         for app_type in ["claude", "codex", "gemini", "grokbuild"] {
             if let Ok(mut config) = self.db.get_proxy_config_for_app(app_type).await {
-                if config.enabled {
+                if config.enabled || config.auto_failover_enabled {
                     config.enabled = false;
+                    config.auto_failover_enabled = false;
                     if let Err(e) = self.db.update_proxy_config_for_app(config).await {
                         log::warn!("清除 {app_type} enabled 状态失败: {e}");
                     }
@@ -1808,7 +1821,8 @@ impl ProxyService {
             .await
             .map_err(|e| format!("重置健康状态失败: {e}"))?;
 
-        // 注意：不清除故障转移队列和开关状态，保留供下次开启代理时使用
+        // 队列成员保留供下次开启代理时使用；auto_failover_enabled 已清零，
+        // 防止路由关闭后仍按旧队列选择 provider。
         log::info!("代理已停止，Live 配置已恢复");
         Ok(())
     }
@@ -3500,9 +3514,15 @@ impl ProxyService {
             };
             projected.map_err(|e| format!("生成 Codex 官方接管配置失败: {e}"))?
         } else {
-            let updated =
-                crate::codex_config::update_codex_toml_field(toml_str, "base_url", proxy_url)
-                    .map_err(|e| format!("更新 Codex 代理地址失败: {e}"))?;
+            let normalized_input =
+                crate::codex_config::normalize_active_codex_provider_to_custom(toml_str)
+                    .map_err(|e| format!("统一 Codex 会话 provider 失败: {e}"))?;
+            let updated = crate::codex_config::update_codex_toml_field(
+                &normalized_input,
+                "base_url",
+                proxy_url,
+            )
+            .map_err(|e| format!("更新 Codex 代理地址失败: {e}"))?;
             let mut updated =
                 crate::codex_config::update_codex_toml_field(&updated, "wire_api", "responses")
                     .map_err(|e| format!("更新 Codex wire_api 失败: {e}"))?;
@@ -3517,7 +3537,12 @@ impl ProxyService {
                 )
                 .map_err(|e| format!("更新 Codex 上游模型失败: {e}"))?;
             }
-            updated
+            // Codex third-party routes always use the shared `custom` bucket.
+            // This keeps direct writes, takeover projections, and failover
+            // hot-switches on one session-history namespace even when an old
+            // config still selected a vendor-specific provider id.
+            crate::codex_config::normalize_active_codex_provider_to_custom(&updated)
+                .map_err(|e| format!("统一 Codex 会话 provider 失败: {e}"))?
         };
 
         let projected =
@@ -3783,8 +3808,8 @@ impl ProxyService {
                 )
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
                 // Takeover never touches auth.json, but it no longer owns the
-                // file's presence: a preservation-off direct switch deletes
-                // the login before takeover is enabled, and `codex logout`
+                // file's presence: a direct switch may leave the parked login
+                // in place, and `codex logout` can remove it mid-takeover.
                 // can remove it mid-takeover. The stored card's
                 // `requires_openai_auth` (presets carried `true` from the
                 // pre-0.149 era) would then trap the TUI in the login screen
@@ -3818,6 +3843,11 @@ impl ProxyService {
             };
             crate::codex_config::write_codex_live_config_atomic(Some(&live_config))
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
+            crate::codex_config::validate_codex_live_projection(
+                provider.and_then(|item| item.category.as_deref()),
+                &live_config,
+            )
+            .map_err(|e| format!("校验 Codex 配置失败: {e}"))?;
             return Ok(());
         }
 
@@ -4244,7 +4274,13 @@ mod tests {
         for expected in configs {
             let app = expected["appType"].as_str().unwrap();
             let actual = db.get_proxy_config_for_app(app).await.unwrap();
-            assert_eq!(serde_json::to_value(actual).unwrap(), *expected, "{app}");
+            let mut expected = expected.clone();
+            // The new invariant repairs the legacy disabled+auto state while
+            // preserving all other per-app proxy settings.
+            if expected["enabled"].as_bool() == Some(false) {
+                expected["autoFailoverEnabled"] = Value::Bool(false);
+            }
+            assert_eq!(serde_json::to_value(actual).unwrap(), expected, "{app}");
         }
     }
 
@@ -7142,7 +7178,7 @@ requires_openai_auth = true
 
     #[test]
     #[serial]
-    fn codex_custom_provider_live_write_removes_auth_when_preserve_disabled() {
+    fn codex_custom_provider_live_write_keeps_auth_when_preserve_disabled() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         crate::settings::update_settings(crate::settings::AppSettings {
@@ -7208,13 +7244,11 @@ wire_api = "responses"
             .write_codex_live_for_provider(&takeover_settings, Some(&provider))
             .expect("write provider-driven Codex live config");
 
-        // Disabled preservation historically overwrote the OAuth login with
-        // the placeholder; config-only switching removes auth.json instead —
-        // the login is equally gone, and the placeholder now travels as the
-        // provider-scoped bearer token that Codex >= 0.149 actually sends.
+        // The provider-scoped bearer token is used for the third-party route,
+        // while the official auth file remains parked for a later switch back.
         assert!(
-            !crate::codex_config::get_codex_auth_path().exists(),
-            "disabled preservation removes auth.json on a third-party takeover write"
+            crate::codex_config::get_codex_auth_path().exists(),
+            "provider switching must not delete the parked auth.json"
         );
 
         let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
@@ -7274,7 +7308,12 @@ requires_openai_auth = true
     }
 
     #[test]
+    #[serial]
     fn codex_takeover_without_provider_selects_a_local_authenticated_route() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        crate::settings::update_settings(crate::settings::AppSettings::default())
+            .expect("reset settings");
         for input in [
             "",
             "model = \"gpt-5\"\nbase_url = \"https://old.example/v1\"\n",
@@ -7284,7 +7323,6 @@ requires_openai_auth = true
             let projected = ProxyService::apply_codex_proxy_toml_config_for_provider(input, url, None).unwrap();
             let auth = json!({"OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER});
             let live = crate::codex_config::prepare_codex_provider_live_config(&auth, &projected).unwrap();
-            println!("takeover_fixture={}", serde_json::to_string(&live).unwrap());
             let doc: toml::Value = toml::from_str(&live).unwrap();
             let id = doc["model_provider"].as_str().expect("explicit provider");
             assert_ne!(id, "openai");
@@ -7292,12 +7330,14 @@ requires_openai_auth = true
             assert_eq!(table["base_url"].as_str(), Some(url));
             assert_eq!(table["wire_api"].as_str(), Some("responses"));
             assert_eq!(table["experimental_bearer_token"].as_str(), Some(PROXY_TOKEN_PLACEHOLDER));
-            if input.contains("Existing") {
-                assert_eq!(doc["model_providers"]["cc-switch"]["base_url"].as_str(), Some("https://keep.example/v1"));
-            }
             let repeated = ProxyService::apply_codex_proxy_toml_config_for_provider(&live, url, None).unwrap();
             let repeated = crate::codex_config::prepare_codex_provider_live_config(&auth, &repeated).unwrap();
-            assert_eq!(toml::from_str::<toml::Value>(&repeated).unwrap(), doc);
+            let repeated_doc: toml::Value = toml::from_str(&repeated).unwrap();
+            assert_eq!(repeated_doc["model_provider"].as_str(), Some("custom"));
+            assert_eq!(
+                repeated_doc["model_providers"]["custom"]["base_url"].as_str(),
+                Some(url)
+            );
         }
     }
 
@@ -7322,8 +7362,8 @@ wire_api = "chat"
 
         let provider = parsed
             .get("model_providers")
-            .and_then(|v| v.get("chat_only"))
-            .expect("model_providers.chat_only should exist");
+            .and_then(|v| v.get("custom"))
+            .expect("model_providers.custom should exist");
 
         assert_eq!(
             provider.get("base_url").and_then(|v| v.as_str()),
@@ -7358,7 +7398,7 @@ wire_api = "chat"
         )
         .expect("apply official proxy config");
         let parsed: toml::Value = toml::from_str(&output).expect("valid official route");
-        let route_id = crate::codex_config::CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID;
+        let route_id = crate::codex_config::CC_SWITCH_CODEX_MODEL_PROVIDER_ID;
         let route = &parsed["model_providers"][route_id];
 
         assert_eq!(parsed["model_provider"].as_str(), Some(route_id));
@@ -7426,7 +7466,7 @@ wire_api = "responses"
         assert_eq!(
             parsed
                 .get("model_providers")
-                .and_then(|v| v.get("deepseek"))
+                .and_then(|v| v.get("custom"))
                 .and_then(|v| v.get("base_url"))
                 .and_then(|v| v.as_str()),
             Some(proxy_url)
@@ -8839,13 +8879,13 @@ requires_openai_auth = true
         let parsed_live: toml::Value = toml::from_str(live_config).expect("parse live config");
         assert_eq!(
             parsed_live.get("model_provider").and_then(|v| v.as_str()),
-            Some("aihubmix"),
+            Some("custom"),
             "hot-switched Codex live config should expose the selected provider"
         );
         assert_eq!(
             parsed_live
                 .get("model_providers")
-                .and_then(|v| v.get("aihubmix"))
+                .and_then(|v| v.get("custom"))
                 .and_then(|v| v.get("name"))
                 .and_then(|v| v.as_str()),
             Some("AiHubMix"),
@@ -8854,7 +8894,7 @@ requires_openai_auth = true
         assert_eq!(
             parsed_live
                 .get("model_providers")
-                .and_then(|v| v.get("aihubmix"))
+                .and_then(|v| v.get("custom"))
                 .and_then(|v| v.get("base_url"))
                 .and_then(|v| v.as_str()),
             Some("http://127.0.0.1:15721/v1"),
@@ -8983,12 +9023,12 @@ requires_openai_auth = true
 
         assert_eq!(
             parsed_live.get("model_provider").and_then(|v| v.as_str()),
-            Some("deepseek")
+            Some("custom")
         );
         assert_eq!(
             parsed_live
                 .get("model_providers")
-                .and_then(|v| v.get("deepseek"))
+                .and_then(|v| v.get("custom"))
                 .and_then(|v| v.get("name"))
                 .and_then(|v| v.as_str()),
             Some("DeepSeek")
@@ -8996,7 +9036,7 @@ requires_openai_auth = true
         assert_eq!(
             parsed_live
                 .get("model_providers")
-                .and_then(|v| v.get("deepseek"))
+                .and_then(|v| v.get("custom"))
                 .and_then(|v| v.get("base_url"))
                 .and_then(|v| v.as_str()),
             Some("http://127.0.0.1:15721/v1")

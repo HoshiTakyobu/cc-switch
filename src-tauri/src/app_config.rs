@@ -4,6 +4,10 @@ use std::str::FromStr;
 
 use crate::services::skill::SkillStore;
 
+/// This fork is distributed as a manually managed build.  Keep updater
+/// commands fail-closed even if a future frontend accidentally calls them.
+pub const SELF_UPDATE_DISABLED: bool = true;
+
 /// MCP 服务器应用状态（标记应用到哪些客户端）
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct McpApps {

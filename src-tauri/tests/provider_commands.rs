@@ -350,7 +350,14 @@ command = "echo"
                 "Latest".to_string(),
                 json!({
                     "auth": {"OPENAI_API_KEY": "fresh-key"},
-                    "config": r#"[mcp_servers.latest]
+                    "config": r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "Latest"
+base_url = "https://latest.example/v1"
+wire_api = "responses"
+
+[mcp_servers.latest]
 type = "stdio"
 command = "say"
 "#

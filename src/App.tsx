@@ -1118,6 +1118,9 @@ function App() {
                           ? handleEnablePiProvider
                           : switchProvider
                       }
+                      onSwitchImmediately={
+                        activeApp === "pi" ? undefined : switchProvider
+                      }
                       onEdit={(provider) => {
                         setEditingProvider(provider);
                       }}

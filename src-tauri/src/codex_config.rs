@@ -2913,6 +2913,52 @@ fn first_free_cc_switch_provider_id(model_providers: Option<&dyn toml_edit::Tabl
     candidate
 }
 
+/// Put the active third-party route in the shared `custom` provider bucket.
+///
+/// Codex's provider id is part of the session/config identity. Older cards
+/// often used names such as `relay`, `cc-switch` or `cc-switch-official`,
+/// which split history even though they all represented a third-party OpenAI
+/// compatible route. Preserve an existing user-authored `custom` table under
+/// a generated compatibility id instead of overwriting it.
+pub(crate) fn normalize_active_codex_provider_to_custom(
+    config_text: &str,
+) -> Result<String, AppError> {
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    let active_id = active_codex_model_provider_id(&doc).or_else(|| {
+        // A takeover fixture or an older config can contain one provider table
+        // without an explicit selector. Treat that sole table as active so the
+        // projection still converges on the shared custom bucket.
+        let providers = doc.get("model_providers")?.as_table_like()?;
+        providers.iter().next().map(|(id, _)| id.to_string())
+    });
+    let Some(active_id) = active_id else {
+        return Ok(config_text.to_string());
+    };
+    if active_id == CC_SWITCH_CODEX_MODEL_PROVIDER_ID {
+        return Ok(config_text.to_string());
+    }
+
+    let Some(providers) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_like_mut())
+    else {
+        return Ok(config_text.to_string());
+    };
+    let Some(active_item) = providers.remove(&active_id) else {
+        return Ok(config_text.to_string());
+    };
+
+    if let Some(existing_custom) = providers.remove(CC_SWITCH_CODEX_MODEL_PROVIDER_ID) {
+        let compatibility_id = first_free_cc_switch_provider_id(Some(providers));
+        providers.insert(&compatibility_id, existing_custom);
+    }
+    providers.insert(CC_SWITCH_CODEX_MODEL_PROVIDER_ID, active_item);
+    doc["model_provider"] = toml_edit::value(CC_SWITCH_CODEX_MODEL_PROVIDER_ID);
+    Ok(doc.to_string())
+}
+
 /// The reserved built-in ids whose `[model_providers.<id>]` tables make
 /// Codex reject the WHOLE config at load (`validate_reserved_model_provider_ids`,
 /// present since 0.148, case-sensitive; the bedrock ids are exempt).
@@ -3305,10 +3351,9 @@ pub fn neutralize_codex_official_auth_fallback_for_proxy_oauth(
 /// `resolve_provider_auth` short-circuits on `env_key` /
 /// `experimental_bearer_token` before consulting it — but it does drive the
 /// login UX: `true` with no login in `auth.json` traps the TUI in the
-/// login/onboarding screen (preservation off deletes the file on every
-/// third-party switch), while `false` next to a preserved ChatGPT login
+/// login/onboarding screen, while `false` next to a parked ChatGPT login
 /// makes Codex treat the session as logged out (account state hidden, the
-/// preserved tokens never refreshed). Stored third-party configs cannot be
+/// parked tokens are not refreshed). Stored third-party configs cannot be
 /// trusted here: presets and the custom template carried
 /// `requires_openai_auth = true` from the pre-0.149 era when auth.json held
 /// the third-party key, so the stamp overrides whatever the card says.
@@ -3320,13 +3365,11 @@ pub fn neutralize_codex_official_auth_fallback_for_proxy_oauth(
 /// refuse — and keyless header-auth or local-server tables must keep their
 /// user-authored shape (0.149 keeps them unauthenticated either way).
 ///
-/// `preserve_official_login` is the post-write login state of `auth.json`.
-/// The direct-switch plan derives it from the preservation setting (which
-/// decides whether the file survives the switch); the takeover writer
-/// derives it from the live file itself — takeover never touches
-/// `auth.json`, but it no longer owns the file's presence (a
-/// preservation-off direct switch deletes it before takeover is enabled),
-/// so the stored card's flag cannot be trusted there either.
+/// `preserve_official_login` controls the login UX flag. The direct-switch
+/// plan derives it from the user setting; auth.json itself remains parked in
+/// both modes. The takeover writer derives the value from the live file —
+/// takeover never mutates auth.json, so the stored card's flag cannot be
+/// trusted there either.
 pub(crate) fn align_codex_requires_openai_auth_with_login_preservation(
     config_text: &str,
     preserve_official_login: bool,
@@ -4052,6 +4095,19 @@ fn plan_codex_live_write(
             None => None,
         };
         let config_text = migrated.as_deref().or(config_text);
+        // A config captured from an older proxy takeover may still select the
+        // legacy `cc-switch-official` alias (or an owned `custom` proxy table).
+        // Direct/native official writes must first remove that local proxy
+        // projection, then the unified-session injection below can create the
+        // canonical `custom` native bucket without carrying a localhost URL
+        // into a non-takeover Codex process.
+        let cleaned_official_route = match config_text {
+            Some(text) if codex_config_has_official_proxy_route(text) => {
+                Some(remove_codex_official_proxy_route(text)?)
+            }
+            _ => None,
+        };
+        let config_text = cleaned_official_route.as_deref().or(config_text);
         // Official writes never go through prepare_codex_provider_live_config,
         // so normalize name-less custom tables here too — 0.149 validates
         // EVERY provider table at load, and an official config can carry
@@ -4083,11 +4139,12 @@ fn plan_codex_live_write(
     // (openai/codex#39214) custom providers no longer inherit ambient auth
     // from auth.json, so the API key travels as a provider-scoped
     // `experimental_bearer_token` in config.toml (honored since Codex 0.48).
-    // auth.json is reserved for the official ChatGPT login: kept when the
-    // preservation setting is on, deleted otherwise. It never carries
-    // third-party keys, so a `requires_openai_auth = true` fallback has no
-    // third-party credential to mis-send and pre-0.48 auth.json-only Codex
-    // releases are the only casualty.
+    // auth.json is reserved for the official ChatGPT login. Keep it as a
+    // parked credential even when the user selected the legacy preservation
+    // toggle off: deleting the file makes a later official switch look like a
+    // dead session and is unnecessary when the active third-party table has
+    // its own bearer/env/header credential. The active route is still forced
+    // away from the official fallback below.
     // The key may live in auth.OPENAI_API_KEY or already sit in the config
     // text (e.g. `auth = {}` raw-edited providers) — mirror
     // prepare_codex_provider_live_config's token sources.
@@ -4113,15 +4170,18 @@ fn plan_codex_live_write(
         _ => None,
     };
     let config_text = normalized.as_deref().or(config_text);
+    let custom_routed = config_text
+        .filter(|text| !text.trim().is_empty())
+        .map(normalize_active_codex_provider_to_custom)
+        .transpose()?;
+    let config_text = custom_routed.as_deref().or(config_text);
 
-    // The preservation setting decides whether the official login in
-    // auth.json survives a third-party switch. Off means the file is
-    // deleted — a lingering login next to a third-party route is the leak
-    // shape the gates exist to prevent, and `{}` is not logout, the file
-    // must go (see clear_stale_codex_live_auth_after_official_switch). The
-    // active table's `requires_openai_auth` is stamped to match below, so
-    // Codex's login UX agrees with the file state either way.
-    let remove_auth_file = !preserve_official_login;
+    // Never remove auth.json as part of a provider switch. Its presence is
+    // harmless when the third-party table carries its own credential, while
+    // deleting it can strand the user's official login and make existing
+    // sessions appear unusable. `requires_openai_auth` is aligned below so
+    // Codex does not read this parked credential for a third-party route.
+    let remove_auth_file = false;
 
     let live_config = match config_text {
         Some(text) if !text.trim().is_empty() => {
@@ -4190,6 +4250,7 @@ pub fn write_codex_live_for_provider(
     auth: &Value,
     config_text: Option<&str>,
 ) -> Result<(), AppError> {
+    let snapshot = CodexLiveStateSnapshot::capture()?;
     let plan = plan_codex_live_write(
         category,
         auth,
@@ -4197,14 +4258,115 @@ pub fn write_codex_live_for_provider(
         crate::settings::preserve_codex_official_auth_on_switch(),
     )?;
     if plan.write_full_auth {
-        return write_codex_live_atomic(auth, plan.config_text.as_deref());
+        write_codex_live_atomic(auth, plan.config_text.as_deref())?;
+        if let Some(expected_config) = plan
+            .config_text
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            if let Err(error) = validate_codex_live_projection(category, expected_config) {
+                let _ = snapshot.restore_preserving_newer_same_account_auth();
+                return Err(error);
+            }
+        }
+        return Ok(());
     }
-    write_codex_live_config_atomic(plan.config_text.as_deref())?;
-    // Config is already committed at this point, so a cleanup failure
-    // degrades to a warning instead of reporting an unswitched state.
+    if let Err(error) = write_codex_live_config_atomic(plan.config_text.as_deref()) {
+        let _ = snapshot.restore_preserving_newer_same_account_auth();
+        return Err(error);
+    }
+    if let Some(expected_config) = plan
+        .config_text
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
+        if let Err(error) = validate_codex_live_projection(category, expected_config) {
+            let _ = snapshot.restore_preserving_newer_same_account_auth();
+            return Err(error);
+        }
+    }
+    // `remove_auth_file` is retained in the plan for compatibility with old
+    // callers/tests, but is intentionally false for every new write.
     if plan.remove_auth_file {
         remove_codex_live_auth_after_third_party_switch();
     }
+    Ok(())
+}
+
+/// Verify the actual Codex files after a live projection was committed.
+/// Preflight validates the generated text, but a read-back check protects
+/// against partial writes, stale paths and future writer drift. Tokens are
+/// never included in errors or logs.
+pub(crate) fn validate_codex_live_projection(
+    category: Option<&str>,
+    expected_config_text: &str,
+) -> Result<(), AppError> {
+    let actual = read_codex_config_text()?;
+    validate_config_toml(&actual)?;
+
+    let expected_doc = expected_config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("预期 Codex 配置无效: {e}")))?;
+    let actual_doc = actual
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("写入后的 Codex 配置无效: {e}")))?;
+
+    let expected_provider = active_codex_model_provider_id(&expected_doc);
+    let actual_provider = active_codex_model_provider_id(&actual_doc);
+    if category == Some("official") {
+        // Official/native Codex configs may intentionally omit model_provider;
+        // the built-in OpenAI route is selected by Codex in that shape. When
+        // an explicit provider is present, still verify that the writer did
+        // not change it behind our back.
+        if expected_provider != actual_provider {
+            return Err(AppError::Message(
+                "Codex 官方配置写入校验失败：活动 provider 未按目标落盘".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+
+    let expected_provider = expected_provider
+        .ok_or_else(|| AppError::Message("Codex 配置缺少 model_provider".to_string()))?;
+    let actual_provider = actual_provider
+        .ok_or_else(|| AppError::Message("写入后的 Codex 配置缺少 model_provider".to_string()))?;
+    if expected_provider != actual_provider {
+        return Err(AppError::Message(format!(
+            "Codex 配置写入校验失败：活动 provider 未落盘（expected={expected_provider}, actual={actual_provider}）"
+        )));
+    }
+
+    {
+        let actual_table = actual_doc
+            .get("model_providers")
+            .and_then(|item| item.as_table_like())
+            .and_then(|table| table.get(actual_provider.as_str()))
+            .and_then(|item| item.as_table_like())
+            .ok_or_else(|| {
+                AppError::Message(
+                    "Codex 第三方配置写入校验失败：活动 provider 表不存在".to_string(),
+                )
+            })?;
+        let has_provider_owned_auth = actual_table.get("experimental_bearer_token").is_some()
+            || actual_table.get("env_key").is_some()
+            || actual_table.get("http_headers").is_some();
+        if !has_provider_owned_auth
+            && codex_config_falls_back_to_official_auth_for_third_party(&actual)
+        {
+            return Err(AppError::Message(
+                "Codex 第三方配置写入校验失败：活动 provider 仍会回退到官方 auth.json".to_string(),
+            ));
+        }
+
+        let expected_base_url = extract_codex_base_url(expected_config_text);
+        let actual_base_url = extract_codex_base_url(&actual);
+        if expected_base_url.is_some() && expected_base_url != actual_base_url {
+            return Err(AppError::Message(
+                "Codex 第三方配置写入校验失败：base_url 未按目标 provider 落盘".to_string(),
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -6244,10 +6406,9 @@ base_url = "https://bedrock.example/v1"
         // true` from the pre-0.149 era (auth.json carried the third-party
         // key back then). On 0.149 the injected bearer decides request auth
         // either way, but the flag drives the login UX: true with auth.json
-        // deleted (preservation off) traps the TUI in the login screen,
-        // false next to a preserved login hides the official account and
-        // lets its tokens go stale. The plan overrides the stored value
-        // with the preservation setting.
+        // parked login and the active bearer remains provider-owned. The plan
+        // still overrides the stored value with the preservation setting, but
+        // never deletes auth.json as part of a provider switch.
         let auth = json!({"OPENAI_API_KEY": "sk-test"});
         let stale_true = "model_provider = \"relay\"\n\n[model_providers.relay]\nname = \"Relay\"\nbase_url = \"https://relay.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n";
 
@@ -6263,7 +6424,10 @@ base_url = "https://bedrock.example/v1"
             off_text.contains("experimental_bearer_token = \"sk-test\""),
             "the bearer injection must be unaffected; got:\n{off_text}"
         );
-        assert!(off.remove_auth_file, "preservation off deletes auth.json");
+        assert!(
+            !off.remove_auth_file,
+            "provider switches keep auth.json parked"
+        );
 
         let on = plan_codex_live_write(None, &auth, Some(stale_true), true)
             .expect("third-party plan with preservation on");
@@ -6288,6 +6452,54 @@ base_url = "https://bedrock.example/v1"
     }
 
     #[test]
+    fn third_party_plan_unifies_active_provider_id_under_custom() {
+        let input = r#"model_provider = "relay"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+        let plan = plan_codex_live_write(
+            None,
+            &json!({"OPENAI_API_KEY": "sk-test"}),
+            Some(input),
+            false,
+        )
+        .expect("third-party plan should normalize the active route");
+        let text = plan.config_text.expect("plan carries config");
+        assert!(text.contains("model_provider = \"custom\""));
+        assert!(text.contains("[model_providers.custom]"));
+        assert!(!text.contains("[model_providers.relay]"));
+        assert!(text.contains("experimental_bearer_token = \"sk-test\""));
+    }
+
+    #[test]
+    fn official_plan_migrates_owned_legacy_proxy_route_to_custom_native_bucket() {
+        let legacy = apply_codex_official_proxy_route_for_provider_id(
+            "model = \"gpt-5.4\"\n",
+            "http://127.0.0.1:15721/v1",
+            CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID,
+        )
+        .expect("seed legacy official route");
+        let plan = plan_codex_live_write(Some("official"), &json!({}), Some(&legacy), true)
+            .expect("official plan should migrate the owned legacy route");
+        let text = plan.config_text.expect("plan carries config");
+        let doc: toml::Value = toml::from_str(&text).expect("parse migrated config");
+        assert_eq!(
+            doc.get("model_provider").and_then(toml::Value::as_str),
+            Some(CC_SWITCH_CODEX_MODEL_PROVIDER_ID)
+        );
+        assert!(doc["model_providers"]
+            .get(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID)
+            .is_none());
+        assert!(doc["model_providers"][CC_SWITCH_CODEX_MODEL_PROVIDER_ID]
+            .get("base_url")
+            .is_none());
+    }
+
+    #[test]
     fn requires_openai_auth_stamp_only_touches_tables_with_a_request_auth_short_circuit() {
         // Keyless header-auth card: no env_key / bearer short-circuit, so
         // stamping true would route request auth to the preserved OAuth
@@ -6308,7 +6520,7 @@ base_url = "https://bedrock.example/v1"
 
         // env_key short-circuits request auth on 0.149 just like the
         // bearer, so the stamp applies: a stale true would otherwise trap
-        // the TUI in the login screen once auth.json is deleted.
+        // the TUI in the login screen once auth.json is absent.
         let env_key = "model_provider = \"envd\"\n\n[model_providers.envd]\nname = \"EnvKey\"\nbase_url = \"https://envd.example/v1\"\nwire_api = \"responses\"\nenv_key = \"MY_KEY\"\nrequires_openai_auth = true\n";
         let plan = plan_codex_live_write(None, &json!({}), Some(env_key), false)
             .expect("env_key plan with preservation off");

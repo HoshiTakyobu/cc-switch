@@ -38,6 +38,7 @@ import {
   useFailoverQueue,
   useAddToFailoverQueue,
   useRemoveFromFailoverQueue,
+  useFailoverEligibility,
 } from "@/lib/query/failover";
 import {
   useCurrentOmoProviderId,
@@ -55,6 +56,7 @@ interface ProviderListProps {
   currentProviderId: string;
   appId: AppId;
   onSwitch: (provider: Provider) => void;
+  onSwitchImmediately?: (provider: Provider) => void;
   onEdit: (provider: Provider) => void;
   onDelete: (provider: Provider) => void;
   onRemoveFromConfig?: (provider: Provider) => void;
@@ -77,6 +79,7 @@ export function ProviderList({
   currentProviderId,
   appId,
   onSwitch,
+  onSwitchImmediately,
   onEdit,
   onDelete,
   onRemoveFromConfig,
@@ -158,12 +161,15 @@ export function ProviderList({
     supportsFailover,
   );
   const { data: failoverQueue } = useFailoverQueue(appId, supportsFailover);
+  const { data: failoverEligibility } = useFailoverEligibility(
+    appId,
+    supportsFailover,
+  );
   const addToQueue = useAddToFailoverQueue();
   const removeFromQueue = useRemoveFromFailoverQueue();
 
   const isFailoverModeActive =
     supportsFailover &&
-    isProxyTakeover === true &&
     isAutoFailoverEnabled === true;
 
   const isOpenCode = appId === "opencode";
@@ -172,21 +178,27 @@ export function ProviderList({
 
   const getFailoverPriority = useCallback(
     (providerId: string): number | undefined => {
-      if (!isFailoverModeActive || !failoverQueue) return undefined;
+      if (!failoverQueue) return undefined;
       const index = failoverQueue.findIndex(
         (item) => item.providerId === providerId,
       );
       return index >= 0 ? index + 1 : undefined;
     },
-    [isFailoverModeActive, failoverQueue],
+    [failoverQueue],
   );
 
   const isInFailoverQueue = useCallback(
     (providerId: string): boolean => {
-      if (!isFailoverModeActive || !failoverQueue) return false;
+      if (!failoverQueue) return false;
       return failoverQueue.some((item) => item.providerId === providerId);
     },
     [isFailoverModeActive, failoverQueue],
+  );
+
+  const getFailoverEligibility = useCallback(
+    (providerId: string) =>
+      failoverEligibility?.find((item) => item.providerId === providerId),
+    [failoverEligibility],
   );
 
   const handleToggleFailover = useCallback(
@@ -473,6 +485,7 @@ export function ProviderList({
                 isOmo={isOmo}
                 isOmoSlim={isOmoSlim}
                 onSwitch={onSwitch}
+                onSwitchImmediately={onSwitchImmediately}
                 onEdit={onEdit}
                 onDelete={onDelete}
                 onRemoveFromConfig={onRemoveFromConfig}
@@ -489,8 +502,12 @@ export function ProviderList({
                 isAutoFailoverEnabled={isFailoverModeActive}
                 failoverPriority={getFailoverPriority(provider.id)}
                 isInFailoverQueue={isInFailoverQueue(provider.id)}
+                failoverDisabledReason={
+                  getFailoverEligibility(provider.id)?.reason
+                }
                 onToggleFailover={
-                  supportsFailover
+                  supportsFailover &&
+                  getFailoverEligibility(provider.id)?.eligible !== false
                     ? (enabled) => handleToggleFailover(provider.id, enabled)
                     : undefined
                 }
@@ -630,6 +647,7 @@ interface SortableProviderCardProps {
   isOmo: boolean;
   isOmoSlim: boolean;
   onSwitch: (provider: Provider) => void;
+  onSwitchImmediately?: (provider: Provider) => void;
   onEdit: (provider: Provider) => void;
   onDelete: (provider: Provider) => void;
   onRemoveFromConfig?: (provider: Provider) => void;
@@ -647,6 +665,7 @@ interface SortableProviderCardProps {
   failoverPriority?: number;
   isInFailoverQueue: boolean;
   onToggleFailover?: (enabled: boolean) => void;
+  failoverDisabledReason?: string;
   activeProviderId?: string;
   // OpenClaw: default model
   isDefaultModel?: boolean;
@@ -663,6 +682,7 @@ function SortableProviderCard({
   isOmo,
   isOmoSlim,
   onSwitch,
+  onSwitchImmediately,
   onEdit,
   onDelete,
   onRemoveFromConfig,
@@ -680,6 +700,7 @@ function SortableProviderCard({
   failoverPriority,
   isInFailoverQueue,
   onToggleFailover,
+  failoverDisabledReason,
   activeProviderId,
   isDefaultModel,
   isRemovalProtected,
@@ -710,6 +731,7 @@ function SortableProviderCard({
         isOmo={isOmo}
         isOmoSlim={isOmoSlim}
         onSwitch={onSwitch}
+        onSwitchImmediately={onSwitchImmediately}
         onEdit={onEdit}
         onDelete={onDelete}
         onRemoveFromConfig={onRemoveFromConfig}
@@ -734,6 +756,7 @@ function SortableProviderCard({
         failoverPriority={failoverPriority}
         isInFailoverQueue={isInFailoverQueue}
         onToggleFailover={onToggleFailover}
+        failoverDisabledReason={failoverDisabledReason}
         activeProviderId={activeProviderId}
         // OpenClaw: default model
         isDefaultModel={isDefaultModel}

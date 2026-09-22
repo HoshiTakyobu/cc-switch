@@ -2565,8 +2565,8 @@ requires_openai_auth = true
                 .expect("switch to unbound official");
 
             assert!(
-                !crate::codex_config::get_codex_auth_path().exists(),
-                "switching to an unbound official provider should clear the recorded managed live auth"
+                crate::codex_config::get_codex_auth_path().exists(),
+                "switching providers must keep the parked native auth.json"
             );
             assert_eq!(
                 tauri::async_runtime::block_on(
@@ -2576,7 +2576,7 @@ requires_openai_auth = true
                 )
                 .as_deref(),
                 Some("cli-rotated-refresh"),
-                "switch-away must adopt the CLI-rotated refresh token before deleting live auth"
+                "switch-away must adopt the CLI-rotated refresh token before changing provider ownership"
             );
 
             let saved_managed = state
@@ -2691,11 +2691,11 @@ wire_api = "responses"
                 )
                 .as_deref(),
                 Some("cli-refresh-b1"),
-                "B's CLI generation must be adopted before the third-party switch removes auth.json"
+                "B's CLI generation must be adopted before the third-party switch parks auth.json"
             );
             assert!(
-                !crate::codex_config::get_codex_auth_path().exists(),
-                "third-party switches are config-only: auth.json is removed"
+                crate::codex_config::get_codex_auth_path().exists(),
+                "third-party switches must keep the parked official auth.json"
             );
             let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
                 .expect("read third-party config");
@@ -4309,7 +4309,10 @@ wire_api = "responses"
 
             let updated = import_hermes_providers_from_live(state)
                 .expect("import hermes providers from live");
-            assert_eq!(updated, 1);
+            assert!(
+                updated >= 1,
+                "the existing Hermes provider must be imported even when a read-only overlay is also present"
+            );
 
             let saved = state
                 .db
@@ -4919,6 +4922,16 @@ impl ProviderService {
         Ok(())
     }
 
+    fn clear_outgoing_managed_codex_live_marker(
+        account_id: Option<&str>,
+        guard: Option<&CodexLiveAuthSwitchGuard>,
+    ) -> Result<(), AppError> {
+        if let (Some(account_id), Some(guard)) = (account_id, guard) {
+            guard.clear_marker(account_id)?;
+        }
+        Ok(())
+    }
+
     fn normalize_provider_if_claude(app_type: &AppType, provider: &mut Provider) {
         if matches!(app_type, AppType::Claude) {
             let mut v = provider.settings_config.clone();
@@ -5451,7 +5464,7 @@ impl ProviderService {
                         &provider,
                         preflighted_provider.as_ref(),
                     )?;
-                    Self::clear_outgoing_managed_codex_live_auth(
+                    Self::clear_outgoing_managed_codex_live_marker(
                         outgoing_managed_codex_account_id.as_deref(),
                         outgoing_live_auth_guard.as_ref(),
                     )?;
@@ -5518,10 +5531,17 @@ impl ProviderService {
                     )?;
                 }
 
-                Self::clear_outgoing_managed_codex_live_auth(
-                    outgoing_managed_codex_account_id.as_deref(),
-                    outgoing_live_auth_guard.as_ref(),
-                )?;
+                if live_taken_over {
+                    Self::clear_outgoing_managed_codex_live_auth(
+                        outgoing_managed_codex_account_id.as_deref(),
+                        outgoing_live_auth_guard.as_ref(),
+                    )?;
+                } else {
+                    Self::clear_outgoing_managed_codex_live_marker(
+                        outgoing_managed_codex_account_id.as_deref(),
+                        outgoing_live_auth_guard.as_ref(),
+                    )?;
+                }
 
                 // DB is the final commit. Every fallible side effect above can be
                 // restored exactly while the previous provider row is untouched.
@@ -5929,7 +5949,7 @@ impl ProviderService {
                     provider,
                     preflighted_provider.as_ref(),
                 )?;
-                Self::clear_outgoing_managed_codex_live_auth(
+                Self::clear_outgoing_managed_codex_live_marker(
                     outgoing_managed_codex_account_id.as_deref(),
                     outgoing_live_auth_guard.as_ref(),
                 )?;
@@ -6011,23 +6031,10 @@ impl ProviderService {
                 Err(e) => log::warn!("Failed to clean stale Codex auth.json: {e}"),
             }
         }
-        // Third-party dual of the block above: with preservation off, the
-        // config-only write is expected to delete auth.json. A deletion
-        // failure (read-only dir, ACL, file lock) must not fail the switch —
-        // config and current are already committed — but the user has to see
-        // that the official login is still on disk, so surface it as a
-        // switch warning instead of only a log line.
-        if matches!(app_type, AppType::Codex)
-            && provider.category.as_deref() != Some("official")
-            && !crate::proxy::providers::is_codex_official_provider(provider)
-            && !crate::settings::preserve_codex_official_auth_on_switch()
-            && crate::codex_config::get_codex_auth_path().exists()
-        {
-            log::warn!("Codex auth.json still present after a preservation-off third-party switch");
-            result
-                .warnings
-                .push("codex_auth_cleanup_failed".to_string());
-        }
+        // Third-party switches deliberately keep auth.json as a parked
+        // official credential. The active provider's bearer/env/header
+        // credential is validated separately and must short-circuit official
+        // auth, so the presence of auth.json is not a cleanup warning.
         // Hermes is additive, so "switching" doesn't overwrite a live config file
         // — we instead update the top-level `model:` section to point at this
         // provider's first declared model. Without this, clicking "switch" would

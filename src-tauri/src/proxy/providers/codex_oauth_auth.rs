@@ -245,6 +245,14 @@ impl CodexLiveAuthSwitchGuard {
             }
         }
     }
+
+    /// Drop cc-switch's ownership marker without deleting the parked native
+    /// `auth.json`. Direct provider switches keep the official login usable so
+    /// switching back cannot strand existing Codex sessions; proxy takeover
+    /// uses `clear_outgoing` when the live OAuth file must be removed.
+    pub(crate) fn clear_marker(&self, account_id: &str) -> Result<(), crate::error::AppError> {
+        crate::codex_config::clear_codex_managed_oauth_live_auth_marker_for_account(account_id)
+    }
 }
 
 impl RefreshTokenAdoptionOutcome {

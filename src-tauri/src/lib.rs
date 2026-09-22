@@ -506,12 +506,16 @@ pub fn run() {
             // 注册 Updater 插件（桌面端）；放在 logger 之后，确保失败可诊断。
             #[cfg(desktop)]
             {
-                if let Err(e) = app
-                    .handle()
-                    .plugin(tauri_plugin_updater::Builder::new().build())
-                {
-                    // 若配置不完整（如缺少 pubkey），跳过 Updater 而不中断应用
-                    log::warn!("初始化 Updater 插件失败，已跳过：{e}");
+                if !crate::app_config::SELF_UPDATE_DISABLED {
+                    if let Err(e) = app
+                        .handle()
+                        .plugin(tauri_plugin_updater::Builder::new().build())
+                    {
+                        // 若配置不完整（如缺少 pubkey），跳过 Updater 而不中断应用
+                        log::warn!("初始化 Updater 插件失败，已跳过：{e}");
+                    }
+                } else {
+                    log::info!("自定义发行版已禁用 Updater 插件");
                 }
             }
 
@@ -1572,6 +1576,7 @@ pub fn run() {
             // Failover queue management
             commands::get_failover_queue,
             commands::get_available_providers_for_failover,
+            commands::get_failover_eligibility,
             commands::add_to_failover_queue,
             commands::remove_from_failover_queue,
             commands::get_auto_failover_enabled,

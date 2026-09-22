@@ -85,7 +85,13 @@ fn sync_codex_provider_writes_config_without_touching_auth() {
         "auth": {
             "OPENAI_API_KEY": "codex-key"
         },
-        "config": r#"base_url = "https://codex.test""#
+        "config": r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "Custom"
+base_url = "https://codex.test"
+wire_api = "responses"
+"#
     });
 
     let provider = Provider::with_id(
@@ -266,8 +272,8 @@ requires_openai_auth = true
 
     assert_eq!(
         parsed.get("model_provider").and_then(|v| v.as_str()),
-        Some("aihubmix"),
-        "ConfigService sync should preserve user-editable model_provider after the one-time migration"
+        Some("custom"),
+        "ConfigService sync should project the active route into the unified custom bucket"
     );
 
     let model_providers = parsed
@@ -275,12 +281,12 @@ requires_openai_auth = true
         .and_then(|v| v.as_table())
         .expect("model_providers should exist");
     assert!(
-        model_providers.get("custom").is_none(),
-        "provider sync should not force user-edited provider ids back to custom"
+        model_providers.get("custom").is_some(),
+        "provider sync should use the unified custom provider bucket"
     );
     assert_eq!(
         model_providers
-            .get("aihubmix")
+            .get("custom")
             .and_then(|v| v.get("base_url"))
             .and_then(|v| v.as_str()),
         Some("https://aihubmix.example/v1")
@@ -293,8 +299,8 @@ requires_openai_auth = true
         .and_then(|v| v.as_str())
         .expect("synced config string");
     assert!(
-        synced_cfg.contains("[model_providers.aihubmix]"),
-        "ConfigService should restore the provider-specific id before writing stored config"
+        synced_cfg.contains("[model_providers.custom]"),
+        "ConfigService should persist the unified custom provider id"
     );
 }
 

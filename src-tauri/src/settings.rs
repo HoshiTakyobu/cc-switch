@@ -396,13 +396,13 @@ pub struct AppSettings {
     #[serde(default = "default_show_profile_switcher")]
     pub show_profile_switcher: bool,
     /// Keep Codex ChatGPT login material in auth.json when switching to third-party providers.
-    /// Opt-in: defaults to false so third-party switches cleanly overwrite auth.json.
-    #[serde(default)]
+    /// Enabled by default; users may explicitly disable it in settings.
+    #[serde(default = "default_true")]
     pub preserve_codex_official_auth_on_switch: bool,
     /// Run official Codex providers under the shared "custom" model_provider id
     /// so official sessions share one resume-history bucket with third-party
-    /// providers. Opt-in: defaults to false.
-    #[serde(default)]
+    /// providers. Enabled by default; users may explicitly disable it.
+    #[serde(default = "default_true")]
     pub unify_codex_session_history: bool,
     /// User opted in (via the enable dialog checkbox) to migrate existing
     /// official sessions ("openai" bucket) into the shared bucket. Persisted so
@@ -543,8 +543,8 @@ impl Default for AppSettings {
             session_auto_sync_enabled: true,
             enable_failover_toggle: false,
             show_profile_switcher: true,
-            preserve_codex_official_auth_on_switch: false,
-            unify_codex_session_history: false,
+            preserve_codex_official_auth_on_switch: true,
+            unify_codex_session_history: true,
             unify_codex_migrate_existing: None,
             failover_confirmed: None,
             first_run_notice_confirmed: None,

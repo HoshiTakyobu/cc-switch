@@ -96,6 +96,7 @@ vi.mock("@/hooks/useStreamCheck", () => ({
 vi.mock("@/lib/query/failover", () => ({
   useAutoFailoverEnabled: () => ({ data: false }),
   useFailoverQueue: () => ({ data: [] }),
+  useFailoverEligibility: () => ({ data: [] }),
   useAddToFailoverQueue: () => ({ mutate: vi.fn() }),
   useRemoveFromFailoverQueue: () => ({ mutate: vi.fn() }),
   useReorderFailoverQueue: () => ({ mutate: vi.fn() }),

@@ -53,6 +53,9 @@ pub async fn copy_text_to_clipboard(text: String) -> Result<bool, String> {
 /// 检查更新
 #[tauri::command]
 pub async fn check_for_updates(handle: AppHandle) -> Result<bool, String> {
+    if crate::app_config::SELF_UPDATE_DISABLED {
+        return Err("此 CC Switch 自定义发行版已禁用自动更新".to_string());
+    }
     handle
         .opener()
         .open_url(

@@ -16,10 +16,22 @@ use tokio::sync::RwLock;
 /// can therefore participate in failover like relay cards. Legacy/unbound
 /// official cards still reuse the calling Codex process's Authorization
 /// header, so they remain single-route to avoid crossing account boundaries.
+pub(crate) fn failover_ineligibility_reason(
+    app_type: &str,
+    provider: &Provider,
+) -> Option<&'static str> {
+    if app_type == AppType::Codex.as_str()
+        && crate::proxy::providers::is_codex_official_provider(provider)
+        && !crate::proxy::providers::is_codex_managed_official_provider(provider)
+    {
+        Some("需要先绑定 CC Switch 管理的 OAuth 账号")
+    } else {
+        None
+    }
+}
+
 pub(crate) fn provider_supports_failover(app_type: &str, provider: &Provider) -> bool {
-    app_type != AppType::Codex.as_str()
-        || !crate::proxy::providers::is_codex_official_provider(provider)
-        || crate::proxy::providers::is_codex_managed_official_provider(provider)
+    failover_ineligibility_reason(app_type, provider).is_none()
 }
 
 /// 供应商路由器
@@ -63,15 +75,15 @@ impl ProviderRouter {
             .flatten();
 
         // 检查该应用的自动故障转移开关是否开启（从 proxy_config 表读取）
-        let auto_failover_enabled = match self.db.get_proxy_config_for_app(app_type).await {
-            Ok(config) => config.auto_failover_enabled,
+        let effective_failover_enabled = match self.db.get_proxy_config_for_app(app_type).await {
+            Ok(config) => config.enabled && config.auto_failover_enabled,
             Err(e) => {
                 log::error!("[{app_type}] 读取 proxy_config 失败: {e}，默认禁用故障转移");
                 false
             }
         };
 
-        if auto_failover_enabled
+        if effective_failover_enabled
             && current_provider
                 .as_ref()
                 .is_some_and(|provider| !provider_supports_failover(app_type, provider))
@@ -82,7 +94,7 @@ impl ProviderRouter {
             // this branch because they resolve their own token per request.
             total_providers = 1;
             result.push(current_provider.expect("checked above"));
-        } else if auto_failover_enabled {
+        } else if effective_failover_enabled {
             // 故障转移开启：仅按队列顺序依次尝试（P1 → P2 → ...）
             let all_providers = self.db.get_all_providers(app_type)?;
 
@@ -408,6 +420,47 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn stale_auto_failover_is_repaired_when_proxy_takeover_is_off() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let current = Provider::with_id(
+            "current".to_string(),
+            "Current".to_string(),
+            json!({}),
+            None,
+        );
+        let fallback = Provider::with_id(
+            "fallback".to_string(),
+            "Fallback".to_string(),
+            json!({}),
+            None,
+        );
+        db.save_provider("claude", &current).unwrap();
+        db.save_provider("claude", &fallback).unwrap();
+        db.set_current_provider("claude", &current.id).unwrap();
+        db.add_to_failover_queue("claude", &fallback.id).unwrap();
+
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.enabled = false;
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+
+        let providers = ProviderRouter::new(db.clone())
+            .select_providers("claude")
+            .await
+            .unwrap();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, current.id);
+        assert!(
+            !db.get_proxy_config_for_app("claude")
+                .await
+                .unwrap()
+                .auto_failover_enabled
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn test_failover_enabled_uses_queue_order_ignoring_current() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().unwrap());
@@ -429,6 +482,7 @@ mod tests {
 
         // 启用自动故障转移（使用新的 proxy_config API）
         let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.enabled = true;
         config.auto_failover_enabled = true;
         db.update_proxy_config_for_app(config).await.unwrap();
 
@@ -461,6 +515,7 @@ mod tests {
         db.add_to_failover_queue("claude", "b").unwrap();
 
         let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.enabled = true;
         config.auto_failover_enabled = true;
         db.update_proxy_config_for_app(config).await.unwrap();
 
@@ -489,6 +544,7 @@ mod tests {
         db.add_to_failover_queue("codex", &fallback.id).unwrap();
 
         let mut config = db.get_proxy_config_for_app("codex").await.unwrap();
+        config.enabled = true;
         config.auto_failover_enabled = true;
         db.update_proxy_config_for_app(config).await.unwrap();
 
@@ -526,6 +582,7 @@ mod tests {
         db.add_to_failover_queue("codex", &fallback.id).unwrap();
 
         let mut config = db.get_proxy_config_for_app("codex").await.unwrap();
+        config.enabled = true;
         config.auto_failover_enabled = true;
         db.update_proxy_config_for_app(config).await.unwrap();
 
@@ -569,6 +626,7 @@ mod tests {
 
         // 启用自动故障转移（使用新的 proxy_config API）
         let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.enabled = true;
         config.auto_failover_enabled = true;
         db.update_proxy_config_for_app(config).await.unwrap();
 
@@ -607,6 +665,7 @@ mod tests {
 
         // 启用自动故障转移
         let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.enabled = true;
         config.auto_failover_enabled = true;
         db.update_proxy_config_for_app(config).await.unwrap();
 

@@ -101,6 +101,23 @@ export function supportsOfficialProxyTakeover(
 }
 
 /**
+ * Whether a provider can be a Codex automatic-failover target.
+ *
+ * Native/unbound official login cards are intentionally excluded: the proxy
+ * cannot replace the calling Codex process's Authorization header with a
+ * different account. CC Switch-managed OAuth cards resolve their own token
+ * per request and are safe to mix with relay providers.
+ */
+export function supportsProviderFailover(
+  appId: AppId,
+  provider: Pick<Provider, "id" | "category" | "meta" | "settingsConfig">,
+): boolean {
+  if (appId !== "codex") return true;
+  const identity = resolveCodexOfficialIdentity(appId, provider);
+  return identity === null || identity === "managed_account";
+}
+
+/**
  * 供应商在指定应用下是否必须开启路由接管才能正常工作（badge 与切换警告共用的权威谓词）。
  *
  * 权威信号是 `providerType`：托管 OAuth 供应商的凭据由本地代理按请求注入

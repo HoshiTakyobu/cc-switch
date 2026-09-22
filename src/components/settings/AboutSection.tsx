@@ -245,8 +245,14 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   );
   const [showInstallCommands, setShowInstallCommands] = useState(false);
 
-  const { hasUpdate, updateInfo, checkUpdate, resetDismiss, isChecking } =
-    useUpdate();
+  const {
+    hasUpdate,
+    updateInfo,
+    checkUpdate,
+    resetDismiss,
+    isChecking,
+    updatesDisabled,
+  } = useUpdate();
 
   const [wslShellByTool, setWslShellByTool] = useState<
     Record<string, WslShellPreference>
@@ -462,6 +468,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   }, [t, updateInfo?.availableVersion, version]);
 
   const handleCheckUpdate = useCallback(async () => {
+    if (updatesDisabled) return;
     if (hasUpdate) {
       if (isPortable) {
         try {
@@ -511,7 +518,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
         closeButton: true,
       });
     }
-  }, [checkUpdate, hasUpdate, isPortable, resetDismiss, t]);
+  }, [checkUpdate, hasUpdate, isPortable, resetDismiss, t, updatesDisabled]);
 
   const handleCopyInstallCommands = useCallback(async () => {
     try {
@@ -940,10 +947,14 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               type="button"
               size="sm"
               onClick={handleCheckUpdate}
-              disabled={isChecking || isDownloading}
+              disabled={updatesDisabled || isChecking || isDownloading}
               className="h-8 gap-1.5 text-xs"
             >
-              {isDownloading ? (
+              {updatesDisabled ? (
+                <>{t("settings.updatesDisabled", {
+                  defaultValue: "自动更新已禁用",
+                })}</>
+              ) : isDownloading ? (
                 <>
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   {t("settings.updating")}

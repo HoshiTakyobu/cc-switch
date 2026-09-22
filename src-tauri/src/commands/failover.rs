@@ -26,13 +26,20 @@ fn require_failover_provider(
         .get_provider_by_id(provider_id, app_type)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("供应商不存在: {provider_id}"))?;
-    if !crate::proxy::provider_router::provider_supports_failover(app_type, &provider) {
-        return Err(
-            "Only OpenAI Official accounts logged in through CC Switch support automatic failover"
-                .to_string(),
-        );
+    if let Some(reason) =
+        crate::proxy::provider_router::failover_ineligibility_reason(app_type, &provider)
+    {
+        return Err(format!("{reason}后才能加入混合故障转移队列"));
     }
     Ok(provider)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailoverEligibility {
+    pub provider_id: String,
+    pub eligible: bool,
+    pub reason: Option<String>,
 }
 
 #[cfg(test)]
@@ -134,6 +141,34 @@ pub async fn get_available_providers_for_failover(
         .collect())
 }
 
+/// Return one backend-owned eligibility decision per provider. The frontend
+/// uses this for disabled-state explanations instead of reimplementing the
+/// Codex managed/native distinction locally.
+#[tauri::command]
+pub async fn get_failover_eligibility(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+) -> Result<Vec<FailoverEligibility>, String> {
+    require_failover_app(&app_type)?;
+    let providers = state
+        .db
+        .get_all_providers(&app_type)
+        .map_err(|e| e.to_string())?;
+    Ok(providers
+        .values()
+        .map(|provider| {
+            let reason =
+                crate::proxy::provider_router::failover_ineligibility_reason(&app_type, provider)
+                    .map(str::to_string);
+            FailoverEligibility {
+                provider_id: provider.id.clone(),
+                eligible: reason.is_none(),
+                reason,
+            }
+        })
+        .collect())
+}
+
 /// 添加供应商到故障转移队列
 #[tauri::command]
 pub async fn add_to_failover_queue(
@@ -174,7 +209,7 @@ pub async fn get_auto_failover_enabled(
         .db
         .get_proxy_config_for_app(&app_type)
         .await
-        .map(|config| config.auto_failover_enabled)
+        .map(|config| config.enabled && config.auto_failover_enabled)
         .map_err(|e| e.to_string())
 }
 
@@ -286,8 +321,9 @@ pub async fn set_auto_failover_enabled(
         }
     }
 
-    // 更新 auto_failover_enabled 字段
-    config.auto_failover_enabled = enabled;
+    // auto_failover_enabled 只有在代理接管已启用时才有实际效果。
+    // 关闭接管时强制清零，避免旧版本遗留 enabled=0/auto=true 的脏状态。
+    config.auto_failover_enabled = enabled && config.enabled;
 
     // 写回数据库
     state

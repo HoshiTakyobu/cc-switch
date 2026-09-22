@@ -7,7 +7,7 @@ import React, {
   useRef,
 } from "react";
 import type { UpdateInfo } from "../lib/updater";
-import { checkForUpdate } from "../lib/updater";
+import { checkForUpdate, SELF_UPDATE_DISABLED } from "../lib/updater";
 import { extractErrorMessage } from "../utils/errorUtils";
 
 interface UpdateContextValue {
@@ -24,6 +24,7 @@ interface UpdateContextValue {
   // 操作方法
   checkUpdate: () => Promise<boolean>;
   resetDismiss: () => void;
+  updatesDisabled: boolean;
 }
 
 const UpdateContext = createContext<UpdateContextValue | undefined>(undefined);
@@ -60,6 +61,13 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
   const isCheckingRef = useRef(false);
 
   const checkUpdate = useCallback(async () => {
+    if (SELF_UPDATE_DISABLED) {
+      setHasUpdate(false);
+      setUpdateInfo(null);
+      setIsDismissed(false);
+      setError(null);
+      return false;
+    }
     if (isCheckingRef.current) return false;
     isCheckingRef.current = true;
     setIsChecking(true);
@@ -118,6 +126,7 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
 
   // 应用启动时自动检查更新
   useEffect(() => {
+    if (SELF_UPDATE_DISABLED) return;
     // 延迟1秒后检查，避免影响启动体验
     const timer = setTimeout(() => {
       checkUpdate().catch(console.error);
@@ -135,6 +144,7 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
     dismissUpdate,
     checkUpdate,
     resetDismiss,
+    updatesDisabled: SELF_UPDATE_DISABLED,
   };
 
   return (

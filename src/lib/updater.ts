@@ -1,5 +1,10 @@
 import { getVersion } from "@tauri-apps/api/app";
 
+// This fork is distributed as a manually managed build.  Keep the switch in
+// one module so the UI cannot accidentally re-enable the updater by importing
+// the Tauri plugin directly.
+export const SELF_UPDATE_DISABLED = true;
+
 export type UpdateChannel = "stable" | "beta";
 
 export interface UpdateInfo {
@@ -27,6 +32,10 @@ export async function checkForUpdate(
 ): Promise<
   { status: "up-to-date" } | { status: "available"; info: UpdateInfo }
 > {
+  if (SELF_UPDATE_DISABLED) {
+    return { status: "up-to-date" };
+  }
+
   // 动态引入，避免在未安装插件时导致打包期问题
   const { check } = await import("@tauri-apps/plugin-updater");
 

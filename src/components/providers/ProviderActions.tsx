@@ -1,5 +1,6 @@
 import {
   Activity,
+  AlertTriangle,
   BarChart3,
   Check,
   ChevronDown,
@@ -39,6 +40,7 @@ interface ProviderActionsProps {
   isProxyTakeover?: boolean;
   isOmo?: boolean;
   onSwitch: () => void;
+  onSwitchImmediately?: () => void;
   onEdit: () => void;
   onDuplicate?: () => void;
   onTest?: () => void;
@@ -51,6 +53,7 @@ interface ProviderActionsProps {
   isInFailoverQueue?: boolean;
   onToggleFailover?: (enabled: boolean) => void;
   isOfficialBlockedByProxy?: boolean;
+  failoverDisabledReason?: string;
   // Hermes v12+ providers: dict overlay — edit/delete must go through Web UI
   isReadOnly?: boolean;
   // OpenClaw: default model
@@ -81,6 +84,7 @@ export function ProviderActions({
   isProxyTakeover = false,
   isOmo = false,
   onSwitch,
+  onSwitchImmediately,
   onEdit,
   onDuplicate,
   onTest,
@@ -93,6 +97,7 @@ export function ProviderActions({
   isInFailoverQueue = false,
   onToggleFailover,
   isOfficialBlockedByProxy = false,
+  failoverDisabledReason,
   isReadOnly = false,
   // OpenClaw: default model
   isDefaultModel = false,
@@ -111,7 +116,7 @@ export function ProviderActions({
 
   // 故障转移模式下的按钮逻辑（累加模式和 OMO 应用不支持故障转移）
   const isFailoverMode =
-    !isAdditiveMode && !isOmo && isAutoFailoverEnabled && onToggleFailover;
+    !isAdditiveMode && !isOmo && Boolean(isAutoFailoverEnabled);
   const isMembershipMode = isAdditiveMode;
   const piStateChangeHint = t("pi.current.stateUnavailableHint");
 
@@ -134,7 +139,9 @@ export function ProviderActions({
         onSwitch(); // 添加到配置
       }
     } else if (isFailoverMode) {
-      onToggleFailover(!isInFailoverQueue);
+      if (onToggleFailover) {
+        onToggleFailover(!isInFailoverQueue);
+      }
     } else {
       onSwitch();
     }
@@ -205,6 +212,22 @@ export function ProviderActions({
     }
 
     if (isFailoverMode) {
+      if (!onToggleFailover) {
+        return {
+          disabled: true,
+          variant: "secondary" as const,
+          className: "opacity-50 cursor-not-allowed",
+          icon: <AlertTriangle className="h-4 w-4" />,
+          text: t("failover.unsupportedProvider", {
+            defaultValue: "不支持混合故障切换",
+          }),
+          title: t("failover.unsupportedProviderHint", {
+            defaultValue:
+              failoverDisabledReason ||
+                "该官方账号未由 CC Switch 托管，无法与其他账号/中转源混合故障切换",
+          }),
+        };
+      }
       if (isInFailoverQueue) {
         return {
           disabled: false,
@@ -383,6 +406,22 @@ export function ProviderActions({
           {buttonState.text}
         </Button>
       </span>
+
+      {isFailoverMode && onSwitchImmediately && onToggleFailover && (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onSwitchImmediately}
+          disabled={isCurrent}
+          className="px-2"
+          title={t("failover.switchNowHint", {
+            defaultValue: "立即切换为当前 P1（不改变队列顺序）",
+          })}
+        >
+          <Zap className="h-3.5 w-3.5" />
+          {t("failover.switchNow", { defaultValue: "立即切换" })}
+        </Button>
+      )}
 
       <div className="flex items-center gap-1">
         <Button

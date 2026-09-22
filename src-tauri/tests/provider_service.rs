@@ -136,7 +136,14 @@ command = "echo"
                 "Latest".to_string(),
                 json!({
                     "auth": {"OPENAI_API_KEY": "fresh-key"},
-                    "config": r#"[mcp_servers.latest]
+                    "config": r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "Latest"
+base_url = "https://latest.example/v1"
+wire_api = "responses"
+
+[mcp_servers.latest]
 type = "stdio"
 command = "say"
 "#
@@ -317,8 +324,8 @@ requires_openai_auth = true
 
     assert_eq!(
         parsed.get("model_provider").and_then(|v| v.as_str()),
-        Some("aihubmix"),
-        "provider switching should preserve user-editable model_provider after the one-time migration"
+        Some("custom"),
+        "provider switching should use the unified custom model_provider"
     );
 
     let model_providers = parsed
@@ -326,12 +333,12 @@ requires_openai_auth = true
         .and_then(|v| v.as_table())
         .expect("model_providers table exists");
     assert!(
-        model_providers.get("custom").is_none(),
-        "provider switching should not force user-edited provider ids back to custom"
+        model_providers.get("custom").is_some(),
+        "provider switching should project the selected route into custom"
     );
     assert_eq!(
         model_providers
-            .get("aihubmix")
+            .get("custom")
             .and_then(|v| v.get("base_url"))
             .and_then(|v| v.as_str()),
         Some("https://aihubmix.example/v1"),
@@ -474,7 +481,7 @@ requires_openai_auth = true
     assert_eq!(
         parsed_live
             .get("model_providers")
-            .and_then(|v| v.get("aihubmix"))
+            .and_then(|v| v.get("custom"))
             .and_then(|v| v.get("experimental_bearer_token"))
             .and_then(|v| v.as_str()),
         Some("bridge-key"),
@@ -483,7 +490,7 @@ requires_openai_auth = true
     assert_eq!(
         parsed_live
             .get("model_providers")
-            .and_then(|v| v.get("aihubmix"))
+            .and_then(|v| v.get("custom"))
             .and_then(|v| v.get("requires_openai_auth"))
             .and_then(|v| v.as_bool()),
         Some(true)
@@ -784,9 +791,8 @@ requires_openai_auth = true
         .expect("switch to third-party provider should succeed");
 
     assert!(
-        !cc_switch_lib::get_codex_auth_path().exists(),
-        "default (preservation off) must delete auth.json on a third-party switch — \
-         the official login goes away and the key rides in config.toml instead"
+        cc_switch_lib::get_codex_auth_path().exists(),
+        "a third-party switch parks the official auth.json so existing sessions remain recoverable"
     );
     let live_config =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
@@ -957,10 +963,10 @@ openai_base_url = "https://relay.example/v1"
         "the top-level reroute must be rewritten away; got:\n{live_config}"
     );
     assert!(
-        live_config.contains("[model_providers.cc-switch]")
+        live_config.contains("[model_providers.custom]")
             && live_config.contains("base_url = \"https://relay.example/v1\"")
             && live_config.contains("experimental_bearer_token = \"third-party-key\""),
-        "routing and key must move into the cc-switch provider table; got:\n{live_config}"
+        "routing and key must move into the unified custom provider table; got:\n{live_config}"
     );
 
     let auth_value: serde_json::Value =
@@ -1022,8 +1028,8 @@ experimental_bearer_token = "config-carried-key"
         "the top-level reroute must be rewritten away; got:\n{live_config}"
     );
     assert!(
-        live_config.contains("[model_providers.cc-switch]"),
-        "a cc-switch provider table must be created; got:\n{live_config}"
+        live_config.contains("[model_providers.custom]"),
+        "the unified custom provider table must be created; got:\n{live_config}"
     );
     assert_eq!(
         cc_switch_lib::extract_codex_experimental_bearer_token(&live_config).as_deref(),
@@ -1079,7 +1085,7 @@ openai_base_url = "https://relay.example/v1"
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(
         !live_config.contains("openai_base_url")
-            && live_config.contains("[model_providers.cc-switch]")
+            && live_config.contains("[model_providers.custom]")
             && live_config.contains("experimental_bearer_token = \"third-party-key\""),
         "routing and key must move into the cc-switch provider table; got:\n{live_config}"
     );
@@ -1705,7 +1711,14 @@ fn switch_codex_projects_mcp_despite_broken_claude_json() {
                 "P".to_string(),
                 json!({
                     "auth": { "OPENAI_API_KEY": "sk-p" },
-                    "config": "model = \"gpt-5.5\"\n"
+                    "config": r#"model_provider = "custom"
+model = "gpt-5.5"
+
+[model_providers.custom]
+name = "Custom"
+base_url = "https://p.example/v1"
+wire_api = "responses"
+"#
                 }),
                 None,
             ),
@@ -2023,13 +2036,13 @@ requires_openai_auth = true
 
     assert_eq!(
         parsed.get("model_provider").and_then(|v| v.as_str()),
-        Some("aihubmix"),
-        "backfill should restore provider b's storage-specific model_provider id"
+        Some("custom"),
+        "backfill should restore provider b through the unified custom provider id"
     );
     assert!(
         parsed
             .get("model_providers")
-            .and_then(|v| v.get("aihubmix"))
+            .and_then(|v| v.get("custom"))
             .is_some(),
         "provider b should keep its own model_providers table after backfill"
     );
@@ -2260,7 +2273,7 @@ wire_api = "responses"
         "live config should keep the proxy bearer placeholder"
     );
     assert!(
-        live_config.contains(r#"model_provider = "deepseek-new""#)
+        live_config.contains(r#"model_provider = "custom""#)
             && live_config.contains(r#"name = "DeepSeek New""#),
         "live config should update the Codex-visible provider label during takeover"
     );
@@ -2979,7 +2992,7 @@ command = "ghost-cmd"
         "shared key should propagate to the next provider's live, got: {live_after}"
     );
     assert!(
-        live_after.contains("model_provider = \"bprov\""),
+        live_after.contains("model_provider = \"custom\""),
         "live should be provider B's own config, got: {live_after}"
     );
     assert!(
