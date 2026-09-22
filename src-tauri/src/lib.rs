@@ -807,24 +807,10 @@ pub fn run() {
                         }
                     }
 
-                    // 统一会话开关的官方历史迁移：开关开启但上次未完成（如文件被占用
-                    // 中途失败）时在启动期重试；函数内部自门控，开关关闭时直接跳过。
-                    match crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket() {
-                        Ok(outcome) => {
-                            if let Some(reason) = outcome.skipped_reason {
-                                log::debug!("○ Codex official history unify migration skipped: {reason}");
-                            } else {
-                                log::info!(
-                                    "✓ Codex official history unify migration completed: jsonl_files={}, state_rows={}",
-                                    outcome.migrated_jsonl_files,
-                                    outcome.migrated_state_rows
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("✗ Codex official history unify migration failed: {e}");
-                        }
-                    }
+                    // The official-history migration owns a delayed retry loop:
+                    // while any Codex process is alive it touches neither JSONL
+                    // nor the state DB, then completes after Codex exits.
+                    crate::codex_history_migration::schedule_codex_official_history_unify_migration();
                 });
             }
 
@@ -1983,6 +1969,10 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) {
         {
             Ok(()) => {
                 log::info!("✓ 已恢复 {app_type} 的代理接管状态");
+                if app_type == crate::app_config::AppType::Codex.as_str() {
+                    crate::codex_history_migration::schedule_codex_official_history_unify_migration(
+                    );
+                }
             }
             Err(e) => {
                 log::error!("✗ 恢复 {app_type} 的代理接管状态失败: {e}");

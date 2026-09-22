@@ -333,6 +333,22 @@ pub fn is_codex_official_provider(provider: &Provider) -> bool {
     is_fixed_official_id || provider.category.as_deref() == Some("official")
 }
 
+/// Whether this is a Codex Official card whose ChatGPT credentials are owned
+/// by CC Switch's managed OAuth store.
+///
+/// Managed official cards can safely participate in proxy failover because
+/// the forwarder resolves the token for the card selected by the router on
+/// every request. Unbound official cards still rely on the calling Codex
+/// process's native Authorization header and therefore remain single-route.
+pub fn is_codex_managed_official_provider(provider: &Provider) -> bool {
+    is_codex_official_provider(provider)
+        && provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.managed_account_id_for("codex_oauth"))
+            .is_some_and(|account_id| !account_id.trim().is_empty())
+}
+
 /// Vendors whose OFFICIAL Codex integration is a native `/responses` gateway that
 /// rejects Codex's freeform custom tools (`apply_patch` with `type: "custom"`,
 /// #6944). This is intentionally separate from `CODEX_WEB_SEARCH_REJECT_HOSTS`:
@@ -1017,6 +1033,18 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn extract_auth(&self, provider: &Provider) -> Option<AuthInfo> {
+        // A managed OpenAI Official card is authenticated by the local OAuth
+        // manager, not by the inbound Codex request. This is what makes an
+        // official account a normal failover target alongside relay cards:
+        // the selected card determines the token even when the client only
+        // sends CC Switch's neutral PROXY_MANAGED credential.
+        if is_codex_managed_official_provider(provider) {
+            return Some(AuthInfo::new(
+                "codex_oauth_placeholder".to_string(),
+                AuthStrategy::CodexOAuth,
+            ));
+        }
+
         // xAI OAuth (Grok subscription): placeholder credentials only; the real
         // access_token is resolved per-request by the forwarder via XaiOAuthManager.
         if provider.is_xai_oauth() {
@@ -1170,6 +1198,8 @@ context_window = 500000
         provider.id = "unbound-official-account".to_string();
         provider.category = Some("official".to_string());
         assert!(is_codex_official_provider(&provider));
+        let adapter = CodexAdapter::new();
+        assert!(adapter.extract_auth(&provider).is_none());
 
         let mut native = provider.clone();
         native.id = crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string();
@@ -1185,16 +1215,21 @@ context_window = 500000
             }),
             ..Default::default()
         });
-        let adapter = CodexAdapter::new();
-
         assert!(is_codex_official_provider(&provider));
+        assert!(is_codex_managed_official_provider(&provider));
         assert_eq!(
             adapter
                 .extract_base_url(&provider)
                 .expect("official base url"),
             "https://chatgpt.com/backend-api/codex"
         );
-        assert!(adapter.extract_auth(&provider).is_none());
+        assert_eq!(
+            adapter
+                .extract_auth(&provider)
+                .expect("managed official auth strategy")
+                .strategy,
+            AuthStrategy::CodexOAuth
+        );
         assert_eq!(
             adapter.build_url(
                 "https://chatgpt.com/backend-api/codex",

@@ -68,7 +68,11 @@ pub async fn set_proxy_takeover_for_app(
     state
         .proxy_service
         .set_takeover_for_app(&app_type, enabled)
-        .await
+        .await?;
+    if enabled && app_type == crate::app_config::AppType::Codex.as_str() {
+        crate::codex_history_migration::schedule_codex_official_history_unify_migration();
+    }
+    Ok(())
 }
 
 /// 获取代理服务器状态

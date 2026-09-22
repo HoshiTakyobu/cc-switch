@@ -27,7 +27,10 @@ fn require_failover_provider(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("供应商不存在: {provider_id}"))?;
     if !crate::proxy::provider_router::provider_supports_failover(app_type, &provider) {
-        return Err("Codex Official 账号卡不支持自动故障转移".to_string());
+        return Err(
+            "Only OpenAI Official accounts logged in through CC Switch support automatic failover"
+                .to_string(),
+        );
     }
     Ok(provider)
 }
@@ -46,7 +49,7 @@ mod tests {
     }
 
     #[test]
-    fn failover_rejects_codex_official_account_cards() {
+    fn failover_accepts_managed_codex_official_account_cards() {
         let db = Database::memory().expect("memory db");
         let mut official = Provider::with_id(
             "official-a".to_string(),
@@ -63,6 +66,21 @@ mod tests {
             }),
             ..Default::default()
         });
+        db.save_provider("codex", &official).expect("save official");
+
+        assert!(require_failover_provider(&db, "codex", &official.id).is_ok());
+    }
+
+    #[test]
+    fn failover_rejects_unbound_codex_official_account_cards() {
+        let db = Database::memory().expect("memory db");
+        let mut official = Provider::with_id(
+            "official-native".to_string(),
+            "OpenAI Official".to_string(),
+            json!({ "auth": {}, "config": "" }),
+            None,
+        );
+        official.category = Some("official".to_string());
         db.save_provider("codex", &official).expect("save official");
 
         assert!(require_failover_provider(&db, "codex", &official.id).is_err());

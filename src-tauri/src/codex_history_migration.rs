@@ -5,6 +5,7 @@
 
 use crate::codex_config::{
     get_codex_config_dir, read_codex_config_text, CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
+    CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID,
 };
 use crate::codex_state_db::codex_state_db_paths;
 use crate::config::{atomic_write, copy_file, get_app_config_dir};
@@ -22,6 +23,9 @@ use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+#[cfg(not(test))]
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 use toml_edit::DocumentMut;
 
@@ -31,10 +35,15 @@ const OFFICIAL_UNIFY_MIGRATION_NAME: &str = "codex-official-history-unify-v1";
 const OFFICIAL_UNIFY_RESTORE_BACKUP_NAME: &str = "codex-official-history-unify-restore-v1";
 /// SQLite 变量上限保守值，IN 列表按此分块。
 const STATE_DB_ID_CHUNK: usize = 500;
+const CODEX_PROCESS_RUNNING_SKIP_REASON: &str = "codex_process_running";
+const OFFICIAL_HISTORY_RETRY_INTERVAL: Duration = Duration::from_secs(15);
 
 /// 串行化官方历史的迁移与还原：开启迁移（启动重试 + 设置保存后台任务）和
 /// 关闭还原可能在毫秒级先后被触发，对同一批 jsonl / state DB 双向改写。
 static CODEX_OFFICIAL_HISTORY_OP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Only one delayed retry loop may watch for Codex to exit. Multiple startup,
+/// settings-save and takeover hooks can all request the same migration.
+static CODEX_OFFICIAL_HISTORY_RETRY_RUNNING: AtomicBool = AtomicBool::new(false);
 
 fn lock_codex_official_history_op() -> std::sync::MutexGuard<'static, ()> {
     CODEX_OFFICIAL_HISTORY_OP_LOCK
@@ -44,6 +53,12 @@ fn lock_codex_official_history_op() -> std::sync::MutexGuard<'static, ()> {
 /// Codex 内建默认 provider id：config.toml 没有 `model_provider` 键时会话归入此桶。
 /// 官方订阅（ChatGPT OAuth / OpenAI API key）的历史会话都记录这个 id。
 const OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID: &str = "openai";
+/// Official history can exist in either Codex's built-in bucket or the
+/// temporary proxy bucket used by earlier CC Switch takeover builds.
+const OFFICIAL_UNIFY_SOURCE_PROVIDER_IDS: &[&str] = &[
+    OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID,
+    CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID,
+];
 const LEGACY_CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "ccswitch";
 // If a Codex preset ever used a temporary routing key, keep that old key here
 // so local history can be bucketed under the current custom provider id.
@@ -187,7 +202,8 @@ pub fn maybe_migrate_codex_provider_template_bucket(
     Ok(outcome)
 }
 
-/// 统一会话开关的存量迁移：把官方会话（内建 "openai" 桶）迁入共享 "custom" 桶。
+/// 统一会话开关的存量迁移：把官方会话（内建 "openai" 桶以及旧版
+/// "cc-switch-official" 代理桶）迁入共享 "custom" 桶。
 ///
 /// 仅当用户在开启弹窗里勾选了"迁入既有官方会话"（`unify_codex_migrate_existing`）
 /// 且本轮未完成时执行；开关关闭时标记与勾选意愿都会被清除（见 `save_settings`），
@@ -214,7 +230,10 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
     // marker 绑定迁移时的 Codex 目录：切换 codex_config_dir 后旧 marker 不再
     // 挡住新目录的迁移（迁移幂等，重跑无害）。
     let codex_dir_key = canonical_dir_string(&codex_dir);
-    if crate::settings::is_codex_official_history_unify_migrated_for_dir(&codex_dir_key) {
+    if crate::settings::is_codex_official_history_unify_migrated_for_dir(
+        &codex_dir_key,
+        OFFICIAL_UNIFY_SOURCE_PROVIDER_IDS,
+    ) {
         return Ok(CodexHistoryProviderBucketMigrationOutcome {
             skipped_reason: Some("already_migrated".to_string()),
             ..Default::default()
@@ -233,8 +252,24 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
         });
     }
 
-    let source_provider_ids: BTreeSet<String> =
-        std::iter::once(OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID.to_string()).collect();
+    // A rollout JSONL can still be appended by Codex after it has been read.
+    // Even with the metadata/length recheck below, replacing an actively-open
+    // file can detach the writer from the visible path on Unix or race the next
+    // append on Windows. The state DB belongs to the same live process. Defer
+    // the entire generation until every Codex session-owning main process has
+    // exited; the scheduler retries automatically. Persistent sandbox/helper
+    // services are deliberately ignored because they do not own rollout files.
+    if codex_process_is_running_or_unknown() {
+        return Ok(CodexHistoryProviderBucketMigrationOutcome {
+            skipped_reason: Some(CODEX_PROCESS_RUNNING_SKIP_REASON.to_string()),
+            ..Default::default()
+        });
+    }
+
+    let source_provider_ids: BTreeSet<String> = OFFICIAL_UNIFY_SOURCE_PROVIDER_IDS
+        .iter()
+        .map(|provider_id| (*provider_id).to_string())
+        .collect();
     let backup_root = migration_backup_root(OFFICIAL_UNIFY_MIGRATION_NAME);
     let migrated_jsonl_files =
         migrate_codex_jsonl_files(&codex_dir, &source_provider_ids, &backup_root)?;
@@ -243,8 +278,9 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
     // 备份代际记录来源目录，restore 据此只取当前目录的账本。
     write_backup_generation_meta(&backup_root, &codex_dir_key)?;
 
+    let source_provider_ids: Vec<String> = source_provider_ids.into_iter().collect();
     let outcome = CodexHistoryProviderBucketMigrationOutcome {
-        source_provider_ids: source_provider_ids.into_iter().collect(),
+        source_provider_ids: source_provider_ids.clone(),
         migrated_jsonl_files,
         migrated_state_rows,
         skipped_reason: None,
@@ -257,6 +293,7 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
         CodexOfficialHistoryUnifyMigration {
             completed_at: Utc::now().to_rfc3339(),
             target_provider_id: CC_SWITCH_CODEX_MODEL_PROVIDER_ID.to_string(),
+            source_provider_ids,
             migrated_jsonl_files,
             migrated_state_rows,
             codex_config_dir: Some(codex_dir_key),
@@ -270,6 +307,169 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
     }
 
     Ok(outcome)
+}
+
+/// Whether takeover config must retain the inactive legacy provider alias.
+/// A completed marker proves both historical source buckets were migrated for
+/// this exact CODEX_HOME. Without that proof (including when the user chose not
+/// to migrate existing history), exact resume of an old session still needs the
+/// alias even though every newly-created session uses `custom`.
+pub fn codex_official_history_compat_alias_required() -> bool {
+    if !crate::settings::unify_codex_session_history() {
+        return false;
+    }
+    let codex_dir_key = canonical_dir_string(&get_codex_config_dir());
+    !crate::settings::is_codex_official_history_unify_migrated_for_dir(
+        &codex_dir_key,
+        OFFICIAL_UNIFY_SOURCE_PROVIDER_IDS,
+    )
+}
+
+/// Retry the opt-in official-history migration after a successful Codex live
+/// projection. Startup recovery and a manual takeover can change the live
+/// provider bucket from a legacy route to `custom` after the general startup
+/// migration has already checked it.
+pub fn schedule_codex_official_history_unify_migration() {
+    if !crate::settings::unify_codex_session_history()
+        || !crate::settings::unify_codex_migrate_existing_requested()
+    {
+        return;
+    }
+
+    if CODEX_OFFICIAL_HISTORY_RETRY_RUNNING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async {
+        loop {
+            let result = tauri::async_runtime::spawn_blocking(
+                maybe_migrate_codex_official_history_to_unified_bucket,
+            )
+            .await;
+            let retry_after_codex_exit = match result {
+                Ok(Ok(outcome)) => {
+                    if outcome.skipped_reason.as_deref() == Some(CODEX_PROCESS_RUNNING_SKIP_REASON)
+                    {
+                        log::debug!(
+                            "○ Codex official history migration deferred while Codex is running"
+                        );
+                        true
+                    } else if let Some(reason) = outcome.skipped_reason {
+                        log::debug!(
+                            "○ Codex official history post-projection migration skipped: {reason}"
+                        );
+                        false
+                    } else {
+                        log::info!(
+                            "✓ Codex official history post-projection migration completed: sources={}, jsonl_files={}, state_rows={}",
+                            outcome.source_provider_ids.len(),
+                            outcome.migrated_jsonl_files,
+                            outcome.migrated_state_rows
+                        );
+                        false
+                    }
+                }
+                Ok(Err(error)) => {
+                    log::warn!(
+                        "✗ Codex official history post-projection migration failed: {error}"
+                    );
+                    false
+                }
+                Err(error) => {
+                    log::warn!(
+                        "✗ Codex official history post-projection migration task failed: {error}"
+                    );
+                    false
+                }
+            };
+
+            if !retry_after_codex_exit {
+                break;
+            }
+            tokio::time::sleep(OFFICIAL_HISTORY_RETRY_INTERVAL).await;
+        }
+        CODEX_OFFICIAL_HISTORY_RETRY_RUNNING.store(false, Ordering::Release);
+    });
+}
+
+/// Fail closed: if the platform process list cannot be inspected, leave the
+/// user's live history untouched and let the delayed scheduler try again.
+#[cfg(not(test))]
+fn codex_process_is_running_or_unknown() -> bool {
+    match codex_process_list_output() {
+        Ok(output) => process_list_contains_codex(&output),
+        Err(error) => {
+            log::warn!("无法检查 Codex 进程，暂缓历史迁移: {error}");
+            true
+        }
+    }
+}
+
+#[cfg(test)]
+fn codex_process_is_running_or_unknown() -> bool {
+    false
+}
+
+#[cfg(all(not(test), target_os = "windows"))]
+fn codex_process_list_output() -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let output = Command::new("tasklist.exe")
+        .args(["/FO", "CSV", "/NH"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| format!("tasklist 启动失败: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "tasklist 返回 {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(all(not(test), not(target_os = "windows")))]
+fn codex_process_list_output() -> Result<String, String> {
+    let output = Command::new("ps")
+        .args(["-A", "-o", "comm="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("ps 启动失败: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ps 返回 {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn process_list_contains_codex(output: &str) -> bool {
+    output.lines().any(|line| {
+        // tasklist CSV puts the image name first; `ps ... comm=` emits only the
+        // executable path/name. No full command line is inspected, so a shell
+        // merely mentioning "codex" cannot create a false positive.
+        let first_field = line.split(',').next().unwrap_or(line).trim();
+        let executable = first_field
+            .trim_matches('"')
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(first_field);
+        let stem = executable
+            .strip_suffix(".exe")
+            .or_else(|| executable.strip_suffix(".EXE"))
+            .unwrap_or(executable);
+        stem.eq_ignore_ascii_case("codex")
+    })
 }
 
 /// live config.toml 是否路由到共享 custom 桶（会话分桶只看这个实态：
@@ -1286,6 +1486,21 @@ mod tests {
     use std::ffi::OsString;
     use tempfile::tempdir;
 
+    #[test]
+    fn detects_only_codex_executables_in_platform_process_lists() {
+        let windows = concat!(
+            "\"explorer.exe\",\"100\",\"Console\",\"1\",\"10,000 K\"\n",
+            "\"codex.exe\",\"200\",\"Console\",\"1\",\"20,000 K\"\n",
+        );
+        assert!(process_list_contains_codex(windows));
+        assert!(!process_list_contains_codex(
+            "/Applications/Codex.app/Contents/MacOS/codex-code-mode-host\n"
+        ));
+        assert!(!process_list_contains_codex(
+            "powershell.exe\nmy-codex-wrapper\ncc-switch.exe\n"
+        ));
+    }
+
     struct EnvVarGuard {
         key: &'static str,
         previous: Option<OsString>,
@@ -1625,7 +1840,7 @@ base_url = "https://proxy.example/v1"
         let backup_root = dir.path().join("backup");
         fs::create_dir_all(&codex_dir).expect("create codex dir");
 
-        let source_provider_ids = source_ids(&[OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID]);
+        let source_provider_ids = source_ids(OFFICIAL_UNIFY_SOURCE_PROVIDER_IDS);
 
         let session_dir = codex_dir.join("sessions/2026/06/12");
         fs::create_dir_all(&session_dir).expect("create session dir");
@@ -1633,10 +1848,11 @@ base_url = "https://proxy.example/v1"
         fs::write(
             &session_path,
             concat!(
-                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\",\"model_provider\":\"openai\"}}\n",
-                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s2\",\"model_provider\":\"custom\"}}\n",
-                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s3\",\"model_provider\":\"my-private-relay\"}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"text\":\"openai\"}}\n",
+                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\",\"model_provider\":\"openai\"}}\n",
+                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s2\",\"model_provider\":\"custom\"}}\n",
+                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s3\",\"model_provider\":\"my-private-relay\"}}\n",
+                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s4\",\"model_provider\":\"cc-switch-official\"}}\n",
+                 "{\"type\":\"response_item\",\"payload\":{\"text\":\"openai\"}}\n",
             ),
         )
         .expect("write session");
@@ -1650,9 +1866,10 @@ base_url = "https://proxy.example/v1"
             session_text
                 .matches("\"model_provider\":\"custom\"")
                 .count(),
-            2
+            3
         );
         assert!(!session_text.contains("\"model_provider\":\"openai\""));
+        assert!(!session_text.contains("\"model_provider\":\"cc-switch-official\""));
         assert!(session_text.contains("\"model_provider\":\"my-private-relay\""));
         assert!(
             session_text.contains("{\"type\":\"response_item\",\"payload\":{\"text\":\"openai\"}}")
@@ -1673,10 +1890,11 @@ base_url = "https://proxy.example/v1"
                 id TEXT PRIMARY KEY,
                 model_provider TEXT NOT NULL
             );
-            INSERT INTO threads (id, model_provider) VALUES
-                ('openai-thread', 'openai'),
-                ('custom-thread', 'custom'),
-                ('manual-thread', 'my-private-relay');",
+             INSERT INTO threads (id, model_provider) VALUES
+                 ('openai-thread', 'openai'),
+                 ('custom-thread', 'custom'),
+                 ('legacy-official-thread', 'cc-switch-official'),
+                 ('manual-thread', 'my-private-relay');",
         )
         .expect("seed state db");
         drop(conn);
@@ -1688,7 +1906,7 @@ base_url = "https://proxy.example/v1"
             &backup_root,
         )
         .expect("migrate state db");
-        assert_eq!(migrated_state_rows, 1);
+        assert_eq!(migrated_state_rows, 2);
 
         let conn = Connection::open(&state_db_path).expect("reopen state db");
         let count_provider = |provider_id: &str| -> i64 {
@@ -1699,8 +1917,9 @@ base_url = "https://proxy.example/v1"
             )
             .expect("count provider")
         };
-        assert_eq!(count_provider("custom"), 2);
+        assert_eq!(count_provider("custom"), 3);
         assert_eq!(count_provider("openai"), 0);
+        assert_eq!(count_provider("cc-switch-official"), 0);
         assert_eq!(count_provider("my-private-relay"), 1);
     }
 

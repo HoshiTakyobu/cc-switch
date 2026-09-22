@@ -3191,6 +3191,8 @@ wire_api = "responses"
                             .detect_takeover_in_live_config_for_app(&AppType::Codex),
                         mode == "active"
                     );
+                    let auth_before_rebind =
+                        read_json_file::<Value>(&crate::codex_config::get_codex_auth_path()).ok();
 
                     let target = managed_codex_provider(
                         if rebind { "current" } else { "target" },
@@ -3203,12 +3205,23 @@ wire_api = "responses"
                         state.db.save_provider("codex", &target).unwrap();
                         ProviderService::switch(state, AppType::Codex, &target.id).unwrap();
                     }
-                    let auth: Value =
-                        read_json_file(&crate::codex_config::get_codex_auth_path()).unwrap();
-                    assert_eq!(
-                        auth["tokens"]["access_token"], "new-access",
-                        "{mode}, rebind={rebind}"
-                    );
+                    let auth_after_rebind =
+                        read_json_file::<Value>(&crate::codex_config::get_codex_auth_path()).ok();
+                    if state
+                        .proxy_service
+                        .detect_takeover_in_live_config_for_app(&AppType::Codex)
+                    {
+                        assert_eq!(
+                            auth_after_rebind, auth_before_rebind,
+                            "managed takeover must not pin the replacement account into auth.json: {mode}, rebind={rebind}"
+                        );
+                    } else {
+                        assert_eq!(
+                            auth_after_rebind.as_ref().unwrap()["tokens"]["access_token"],
+                            "new-access",
+                            "{mode}, rebind={rebind}"
+                        );
+                    }
                     assert_eq!(
                         crate::settings::get_effective_current_provider(&state.db, &AppType::Codex)
                             .unwrap()
@@ -3235,10 +3248,10 @@ wire_api = "responses"
                             state.proxy_service.stop().await.unwrap();
                         }
                     });
-                    let restored: Value =
-                        read_json_file(&crate::codex_config::get_codex_auth_path()).unwrap();
+                    let restored =
+                        read_json_file::<Value>(&crate::codex_config::get_codex_auth_path()).ok();
                     assert_eq!(
-                        restored, auth,
+                        restored, auth_after_rebind,
                         "proxy restore must keep the replacement account"
                     );
                 });

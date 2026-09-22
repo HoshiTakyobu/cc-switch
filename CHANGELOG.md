@@ -5,6 +5,52 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.20.3-unified.1] - 2026-09-22
+
+Fork release based on upstream v3.20.3. It unifies CC Switch-managed OpenAI
+accounts and third-party Codex relays under the `custom` model-provider bucket,
+while keeping routing, credentials and failover selection inside CC Switch.
+
+### Added
+
+- Managed OpenAI account cards can participate in the same ordered Codex
+  failover queue as relay cards. OAuth tokens are resolved from the selected
+  managed account per request; native/unbound official cards remain excluded
+  because their caller-owned token cannot safely follow a queue switch.
+- Existing Codex sessions in both the built-in `openai` bucket and the legacy
+  `cc-switch-official` bucket can be migrated to `custom`. Rollout JSONL files
+  and every discovered Codex state database are backed up before mutation.
+- Active-session protection defers the complete history migration while a
+  session-owning Codex process is running and retries every 15 seconds. During
+  that window an inactive local-proxy compatibility alias keeps exact resume of
+  legacy `cc-switch-official` sessions working; new sessions still use
+  `custom`. The alias is removed on a later projection once the migration marker
+  proves both legacy buckets were migrated for the current Codex home.
+
+### Changed
+
+- A CC Switch-managed OpenAI provider now projects `model_provider = "custom"`
+  and `[model_providers.custom]`, using a neutral proxy credential instead of
+  exposing or pinning its OAuth token in Codex `auth.json`.
+- Startup recovery detects the stale `cc-switch-official` takeover shape and
+  rebuilds it as the unified `custom` route.
+- The official-history completion marker records all recognized source provider
+  ids, so a marker created by an older build is retried when support for the
+  legacy proxy bucket is added.
+
+### Safety
+
+- Session JSONL and state databases are never rewritten while a main Codex
+  process is detected. A failed process-list check also fails closed and leaves
+  history untouched.
+- The existing size/mtime concurrency check, atomic replacement and generation
+  backups remain in place. Unknown provider ids and user-authored provider
+  tables are not rewritten.
+- This fork build is unsigned and intended for manual installation.
+
+See [the Chinese release notes](docs/release-notes/v3.20.3-unified.1-zh.md) for
+the activation and session-migration workflow.
+
 ## [3.20.3] - 2026-09-11
 
 Development since v3.20.2 is a short, dense cycle: most of it is contributed correctness fixes on the local proxy and the Codex integration, closing issues that had been open for months, plus a round of preset and pricing maintenance. On the proxy, OpenAI-compatible upstreams that keep an empty `reasoning_content` placeholder in every chunk no longer flood Claude Code with empty Thought blocks (#7227), the Codex Responses-to-Chat converter no longer splits a commentary message from its tool calls into two assistant turns — which ended long agent tasks right after a progress update (#7280) — Claude Desktop's one-token model probe is clamped to the Responses API minimum so mapped models stop reporting "not available" (#7287), and Codex image generation under routing picks up three follow-up fixes for pasted full endpoints, mixed-case suffixes and streamed usage (#7177). Two data-integrity bugs are closed: every normal shutdown copied Claude's retry and timeout settings onto the Codex, Gemini and Grok Build proxy rows (#7210), and syncing a universal provider wiped its children's usage script, common-config opt-out and endpoint auto-select and pushed the card to the bottom of the list (#7212). Codex takeover now honors the proxy address when a card omits `model_provider` (#7263), Codex usage import detects growing rollouts on Windows NTFS through a persisted byte cursor (#7219), the tray shows the bound ChatGPT account's quota for managed Codex cards (#7267), and Claude Fable's weekly limit appears in the provider card and tray. The Claude provider editor gains a "Disable Artifact Tool" quick toggle for gateways that reject Claude Code's Artifact tool schema. On the preset side, Kimi's two Codex presets move to native Responses direct-connect, the aggregator Codex presets are refreshed to current catalogs, DashScope/Bailian is rebranded as 千问AI平台 on Qwen 3.8 (#7183), MiniMax defaults move to M3 (#7255), the bundled DeepSeek Codex catalog mirrors the vision-capable `deepseek-flash` (#7286), and the DeepSeek V4 family is repriced to the V4.1 Flash tier. This release does not change the database schema.

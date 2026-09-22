@@ -1198,7 +1198,8 @@ impl RequestForwarder {
         let codex_responses_to_anthropic = matches!(app_type, AppType::Codex | AppType::GrokBuild)
             && super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint);
         let codex_official_auth_passthrough = matches!(app_type, AppType::Codex)
-            && super::providers::is_codex_official_provider(provider);
+            && super::providers::is_codex_official_provider(provider)
+            && !super::providers::is_codex_managed_official_provider(provider);
 
         if codex_official_auth_passthrough {
             let (expected_chatgpt_account_id, managed_session_matches) = match provider
@@ -2775,10 +2776,13 @@ impl RequestForwarder {
     }
 
     fn categorize_proxy_error(&self, error: &ProxyError, provider: &Provider) -> ErrorCategory {
-        // Authentication belongs to the Codex client for an official route.
-        // Every retry would reuse the selected account's inbound Authorization
-        // header against another card, so no official-route error may fail over.
-        if super::providers::is_codex_official_provider(provider) {
+        // An unbound official route reuses the Codex client's inbound token and
+        // must remain single-route. Managed official cards resolve the selected
+        // account token locally, so their provider/network/auth failures can
+        // safely continue through the normal failover chain.
+        if super::providers::is_codex_official_provider(provider)
+            && !super::providers::is_codex_managed_official_provider(provider)
+        {
             return ErrorCategory::NonRetryable;
         }
 
@@ -4671,6 +4675,38 @@ mod tests {
             assert_eq!(
                 forwarder.categorize_proxy_error(&error, &provider),
                 ErrorCategory::NonRetryable
+            );
+        }
+    }
+
+    #[test]
+    fn managed_official_codex_provider_failures_can_fail_over() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        let mut provider = test_provider_with_type(Some("codex_oauth"));
+        provider.id = "managed-official".to_string();
+        provider.category = Some("official".to_string());
+        provider.settings_config = json!({ "auth": {}, "config": "" });
+        provider.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            auth_binding: Some(crate::provider::AuthBinding {
+                source: crate::provider::AuthBindingSource::ManagedAccount,
+                auth_provider: Some("codex_oauth".to_string()),
+                account_id: Some("account-a".to_string()),
+            }),
+            ..Default::default()
+        });
+
+        for error in [
+            ProxyError::AuthError("managed token unavailable".to_string()),
+            ProxyError::UpstreamError {
+                status: 429,
+                body: None,
+            },
+            ProxyError::Timeout("timeout".to_string()),
+        ] {
+            assert_eq!(
+                forwarder.categorize_proxy_error(&error, &provider),
+                ErrorCategory::Retryable
             );
         }
     }

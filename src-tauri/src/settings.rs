@@ -332,6 +332,11 @@ pub struct CodexProviderTemplateMigration {
 pub struct CodexOfficialHistoryUnifyMigration {
     pub completed_at: String,
     pub target_provider_id: String,
+    /// Provider buckets covered by this migration generation. Older markers
+    /// do not contain this field; treating them as incomplete lets upgraded
+    /// builds pick up newly recognized CC Switch-owned legacy buckets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_provider_ids: Vec<String>,
     #[serde(default)]
     pub migrated_jsonl_files: usize,
     #[serde(default)]
@@ -852,12 +857,35 @@ pub fn mark_codex_provider_template_migrated(
 
 /// 统一会话迁移标记是否覆盖指定目录。标记里没记目录（不应出现的旧格式）
 /// 视为不匹配——重跑迁移是幂等的，宁可重迁也不漏迁。
-pub fn is_codex_official_history_unify_migrated_for_dir(codex_dir: &str) -> bool {
+pub fn is_codex_official_history_unify_migrated_for_dir(
+    codex_dir: &str,
+    required_source_provider_ids: &[&str],
+) -> bool {
     get_settings()
         .local_migrations
         .as_ref()
         .and_then(|migrations| migrations.codex_official_history_unify_v1.as_ref())
-        .is_some_and(|migration| migration.codex_config_dir.as_deref() == Some(codex_dir))
+        .is_some_and(|migration| {
+            codex_official_history_unify_migration_covers(
+                migration,
+                codex_dir,
+                required_source_provider_ids,
+            )
+        })
+}
+
+fn codex_official_history_unify_migration_covers(
+    migration: &CodexOfficialHistoryUnifyMigration,
+    codex_dir: &str,
+    required_source_provider_ids: &[&str],
+) -> bool {
+    migration.codex_config_dir.as_deref() == Some(codex_dir)
+        && required_source_provider_ids.iter().all(|required| {
+            migration
+                .source_provider_ids
+                .iter()
+                .any(|stored| stored.eq_ignore_ascii_case(required))
+        })
 }
 
 /// 条件写入迁移完成标记：仅当此刻开关仍开启且迁移意愿仍在时才写。
@@ -1231,5 +1259,33 @@ mod tests {
             resolve_override_path(r"~\pi\agent"),
             home.join("pi").join("agent")
         );
+    }
+
+    #[test]
+    fn legacy_official_history_marker_retries_newly_recognized_proxy_bucket() {
+        let legacy: CodexOfficialHistoryUnifyMigration =
+            serde_json::from_value(serde_json::json!({
+                "completedAt": "2026-09-21T00:00:00Z",
+                "targetProviderId": "custom",
+                "migratedJsonlFiles": 1,
+                "migratedStateRows": 1,
+                "codexConfigDir": "C:/Users/test/.codex"
+            }))
+            .expect("deserialize legacy marker");
+        assert!(!codex_official_history_unify_migration_covers(
+            &legacy,
+            "C:/Users/test/.codex",
+            &["openai", "cc-switch-official"],
+        ));
+
+        let complete = CodexOfficialHistoryUnifyMigration {
+            source_provider_ids: vec!["openai".into(), "cc-switch-official".into()],
+            ..legacy
+        };
+        assert!(codex_official_history_unify_migration_covers(
+            &complete,
+            "C:/Users/test/.codex",
+            &["openai", "cc-switch-official"],
+        ));
     }
 }

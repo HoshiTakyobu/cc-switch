@@ -12,12 +12,14 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Codex Official requests carry the selected account's native Authorization
-/// header. Reusing that request against another account card would cross the
-/// account boundary, so these cards must never participate in provider retry.
+/// Managed Codex Official cards resolve their own OAuth token per request and
+/// can therefore participate in failover like relay cards. Legacy/unbound
+/// official cards still reuse the calling Codex process's Authorization
+/// header, so they remain single-route to avoid crossing account boundaries.
 pub(crate) fn provider_supports_failover(app_type: &str, provider: &Provider) -> bool {
     app_type != AppType::Codex.as_str()
         || !crate::proxy::providers::is_codex_official_provider(provider)
+        || crate::proxy::providers::is_codex_managed_official_provider(provider)
 }
 
 /// 供应商路由器
@@ -74,9 +76,10 @@ impl ProviderRouter {
                 .as_ref()
                 .is_some_and(|provider| !provider_supports_failover(app_type, provider))
         {
-            // A selected Codex Official account is an explicit account choice.
-            // Keep it as a single route even if an old failover setting remains
-            // enabled; retrying would reuse its inbound token for another card.
+            // A selected unbound Codex Official account is an explicit native
+            // login choice. Keep it as a single route even if an old failover
+            // setting remains enabled; managed official cards do not enter
+            // this branch because they resolve their own token per request.
             total_providers = 1;
             result.push(current_provider.expect("checked above"));
         } else if auto_failover_enabled {
@@ -470,7 +473,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn codex_official_current_stays_single_route_when_failover_is_stale() {
+    async fn managed_codex_official_current_obeys_the_enabled_failover_queue() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().unwrap());
         let official = managed_codex_official("official-a", "account-a");
@@ -494,12 +497,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(providers.len(), 1);
-        assert_eq!(providers[0].id, official.id);
+        assert_eq!(providers[0].id, fallback.id);
     }
 
     #[tokio::test]
     #[serial]
-    async fn stale_codex_official_queue_entries_are_not_retry_targets() {
+    async fn managed_codex_official_queue_entries_are_retry_targets() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().unwrap());
         let current = Provider::with_id(
@@ -535,7 +538,7 @@ mod tests {
                 .iter()
                 .map(|provider| provider.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["fallback"]
+            vec!["fallback", "official-a"]
         );
     }
 
